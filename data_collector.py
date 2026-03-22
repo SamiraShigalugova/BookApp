@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 import psycopg2
-from psycopg2.extras import Json, execute_values
+from psycopg2.extras import Json
 
 
 class DataCollector:
@@ -18,7 +18,7 @@ class DataCollector:
     def __init__(self, data_dir: str = "user_data"):
         self.data_dir = data_dir
         self.user_interactions: Dict[int, List[dict]] = defaultdict(list)
-        self.books_metadata: Dict[str, dict] = {}  # book_id (str) -> полная информация о книге
+        self.books_metadata: Dict[str, dict] = {}
         self.conn = None
         self.use_postgres = False
 
@@ -147,11 +147,6 @@ class DataCollector:
                         interaction['book_data'] = row[4]
                     self.user_interactions[user_id].append(interaction)
                 
-                # Загружаем пользователей
-                cur.execute("SELECT user_id, username FROM users")
-                rows = cur.fetchall()
-                self.user_data = {row[0]: {'username': row[1]} for row in rows}
-                
                 print(f"📚 Загружено из PostgreSQL: {len(self.books_metadata)} книг, {len(self.user_interactions)} пользователей")
                 
         except Exception as e:
@@ -180,7 +175,6 @@ class DataCollector:
                 if 'user_id' in data:
                     user_id = data['user_id']
                     interactions = data.get('interactions', [])
-                    # Преобразуем book_id в строку
                     for inter in interactions:
                         inter['book_id'] = str(inter['book_id'])
                     self.user_interactions[user_id] = interactions
@@ -199,13 +193,11 @@ class DataCollector:
             return
         
         # Файловое хранилище
-        # Сохраняем метаданные книг
         metadata_file = os.path.join(self.data_dir, "books_metadata.json")
         with open(metadata_file, 'w', encoding='utf-8') as f:
             json.dump(self.books_metadata, f, indent=2, default=str, ensure_ascii=False)
         print(f"💾 Сохранены метаданные книг: {len(self.books_metadata)} записей")
 
-        # Сохраняем данные каждого пользователя
         for user_id, interactions in self.user_interactions.items():
             user_file = os.path.join(self.data_dir, f"user_{user_id}.json")
             data = {
@@ -221,11 +213,7 @@ class DataCollector:
         print(f"💾 Все данные сохранены: {len(self.user_interactions)} пользователей")
 
     def add_books(self, books: List[dict]):
-        """
-        Добавляет список книг в метаданные.
-        Ожидается, что каждая книга содержит поля:
-        id (str), title, author, genre, tags, description, average_rating.
-        """
+        """Добавляет список книг в метаданные."""
         for book in books:
             book_id = book["id"]
             self.books_metadata[book_id] = {
@@ -238,7 +226,6 @@ class DataCollector:
                 'cover_url': book.get('cover_url', '')
             }
             
-            # Если используем PostgreSQL, сохраняем сразу
             if self.use_postgres and self.conn:
                 try:
                     with self.conn.cursor() as cur:
@@ -275,13 +262,9 @@ class DataCollector:
 
     def add_interaction(self, user_id: int, book_id: str, rating: float,
                         status: str, book_data: dict = None):
-        """
-        Добавление нового взаимодействия пользователя с книгой.
-        Если передан book_data, метаданные книги обновляются.
-        """
+        """Добавление нового взаимодействия пользователя с книгой."""
         print(f"👤 Добавление взаимодействия для пользователя {user_id} с рейтингом {rating}")
 
-        # Создаём запись о взаимодействии
         interaction = {
             'user_id': user_id,
             'book_id': str(book_id),
@@ -290,7 +273,6 @@ class DataCollector:
             'timestamp': datetime.now().isoformat(),
         }
 
-        # Если переданы данные книги, сохраняем их
         if book_data:
             self.books_metadata[book_id] = {
                 'title': book_data.get('title', ''),
@@ -301,19 +283,16 @@ class DataCollector:
                 'average_rating': book_data.get('average_rating', 0.0),
                 'cover_url': book_data.get('cover_url', '')
             }
-            interaction['book_data'] = book_data  # для истории
+            interaction['book_data'] = book_data
 
-        # Если используем PostgreSQL, сохраняем сразу
         if self.use_postgres and self.conn:
             try:
                 with self.conn.cursor() as cur:
-                    # Сохраняем или обновляем пользователя
                     cur.execute("""
                         INSERT INTO users (user_id) VALUES (%s)
                         ON CONFLICT (user_id) DO UPDATE SET last_updated = NOW()
                     """, (user_id,))
                     
-                    # Сохраняем взаимодействие
                     cur.execute("""
                         INSERT INTO interactions (user_id, book_id, rating, status, book_data)
                         VALUES (%s, %s, %s, %s, %s)
@@ -324,7 +303,6 @@ class DataCollector:
                             timestamp = NOW()
                     """, (user_id, book_id, rating, status, Json(book_data) if book_data else None))
                     
-                    # Сохраняем метаданные книги
                     if book_data:
                         cur.execute("""
                             INSERT INTO books_metadata (book_id, title, author, genre, tags, description, average_rating, cover_url)
@@ -351,37 +329,27 @@ class DataCollector:
                     
                     self.conn.commit()
                     print(f"✅ Взаимодействие сохранено в PostgreSQL")
-                    
             except Exception as e:
                 print(f"❌ Ошибка сохранения в PostgreSQL: {e}")
                 self.conn.rollback()
-                # Fallback на файловое хранилище
                 self._save_interaction_to_file(user_id, book_id, rating, status, book_data, interaction)
         else:
-            # Файловое хранилище
             self._save_interaction_to_file(user_id, book_id, rating, status, book_data, interaction)
 
         self._update_stats()
 
     def _save_interaction_to_file(self, user_id, book_id, rating, status, book_data, interaction):
         """Сохранение взаимодействия в файл (fallback)"""
-        # Добавляем во взаимодействия пользователя
         if user_id not in self.user_interactions:
             self.user_interactions[user_id] = []
 
-        # Удаляем старую запись, если была (чтобы не дублировать)
         self.user_interactions[user_id] = [
             i for i in self.user_interactions[user_id]
             if not (i['book_id'] == book_id and i.get('user_id') == user_id)
         ]
-
         self.user_interactions[user_id].append(interaction)
-
-        # Сохраняем все данные
         self.save_all_data()
-
         print(f"✅ Взаимодействие добавлено: пользователь {user_id}, книга {book_id}")
-        print(f"📊 Всего у пользователя {user_id}: {len(self.user_interactions[user_id])} книг")
 
     def _update_stats(self):
         """Обновление статистики."""
@@ -459,9 +427,7 @@ class DataCollector:
         return all_interactions
 
     def get_all_books(self) -> List[dict]:
-        """
-        Возвращает список всех книг из метаданных в формате, пригодном для Recommender.
-        """
+        """Возвращает список всех книг из метаданных."""
         if self.use_postgres and self.conn:
             try:
                 with self.conn.cursor() as cur:
@@ -526,7 +492,6 @@ class DataCollector:
                 print(f"🧹 Данные пользователя {user_id} очищены из PostgreSQL")
                 return True
             
-            # Файловое хранилище
             if user_id in self.user_interactions:
                 del self.user_interactions[user_id]
 
