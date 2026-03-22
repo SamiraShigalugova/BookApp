@@ -1,10 +1,9 @@
-# data_models.py - ДОЛЖЕН СОДЕРЖАТЬ ТОЛЬКО PYDANTIC МОДЕЛИ!
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
 class BookData(BaseModel):
-    id: int
+    id: str                         # строковый идентификатор (globalId)
     title: str
     author: str
     genre: str
@@ -15,7 +14,7 @@ class BookData(BaseModel):
 
 class UserInteraction(BaseModel):
     user_id: int
-    book_id: int
+    book_id: str                    # строковый идентификатор
     rating: float = 0.0
     status: str
     timestamp: Optional[datetime] = None
