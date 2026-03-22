@@ -1,3 +1,5 @@
+
+
 import asyncio
 import os
 import httpx
@@ -9,11 +11,10 @@ import json
 import base64
 import uuid
 from dotenv import load_dotenv
-from gigachat import GigaChat
 
 from data_models import *
 from data_collector import DataCollector
-from neural_model import HybridRecommender
+from recommender import BookRecommender
 
 load_dotenv()
 
@@ -21,14 +22,29 @@ load_dotenv()
 LOCAL_BOOKS = []
 try:
     with open('local_books.json', 'r', encoding='utf-8') as f:
-        LOCAL_BOOKS = json.load(f)
+        raw_books = json.load(f)
+    # Приводим к единому формату
+    for i, book in enumerate(raw_books):
+        # ID – строка (как globalId)
+        if 'id' not in book:
+            book['id'] = str(i + 1)
+        else:
+            book['id'] = str(book['id'])
+        book['average_rating'] = book.get('averageRating', book.get('average_rating', 0.0))
+        if 'averageRating' in book:
+            del book['averageRating']
+        if 'tags' not in book:
+            book['tags'] = []
+        if 'description' not in book:
+            book['description'] = ''
+        LOCAL_BOOKS.append(book)
     print(f"✅ Загружено {len(LOCAL_BOOKS)} локальных книг")
 except Exception as e:
     print(f"❌ Ошибка загрузки локальных книг: {e}")
 
-# ==================== ФУНКЦИИ ПОИСКА ====================
+# ==================== ФУНКЦИИ ПОИСКА (не используются в гибридных рекомендациях, но оставлены для чата) ====================
 def search_local_books(criteria: dict) -> list:
-    """Поиск по локальному JSON"""
+    """Поиск по локальному JSON (возвращает в формате GoogleBook)."""
     genres = [g.lower() for g in criteria.get("genres", [])]
     keywords = [k.lower() for k in criteria.get("keywords", [])]
     min_rating = criteria.get("min_rating", 0)
@@ -44,7 +60,7 @@ def search_local_books(criteria: dict) -> list:
         for kw in keywords:
             if kw in text:
                 score += 1
-        if book.get("averageRating", 0) >= min_rating:
+        if book.get("average_rating", 0) >= min_rating:
             score += 0.5
         if score > 0:
             results.append((book, score))
@@ -53,16 +69,16 @@ def search_local_books(criteria: dict) -> list:
     return [book_to_google_book(book) for book, _ in results[:max_results]]
 
 def book_to_google_book(book: dict) -> dict:
-    """Конвертирует локальную книгу в формат GoogleBook"""
+    """Конвертирует локальную книгу в формат GoogleBook."""
     cover = book.get("cover", "")
     return {
-        "id": f"local_{book['title']}_{book['author']}".replace(" ", "_"),
+        "id": book["id"],
         "volumeInfo": {
             "title": book["title"],
             "authors": [book["author"]],
             "description": book.get("description", ""),
             "categories": [book.get("genre", "Unknown")],
-            "averageRating": book.get("averageRating", 0),
+            "averageRating": book.get("average_rating", 0),
             "ratingsCount": book.get("ratingsCount", 0),
             "imageLinks": {"thumbnail": cover} if cover else None,
             "language": book.get("language", "ru")
@@ -70,7 +86,7 @@ def book_to_google_book(book: dict) -> dict:
     }
 
 async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
-    """Поиск в OpenLibrary на основе критериев"""
+    """Поиск в OpenLibrary на основе критериев (возвращает в формате GoogleBook)."""
     query_parts = []
     if criteria.get("genres"):
         for g in criteria["genres"]:
@@ -92,7 +108,7 @@ async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
         return []
 
 def openlibrary_to_google_book(doc: dict) -> dict:
-    """Конвертирует OpenLibrary документ в GoogleBook формат"""
+    """Конвертирует OpenLibrary документ в GoogleBook формат."""
     cover_id = doc.get("cover_i")
     cover_url = f"https://covers.openlibrary.org/b/id/{cover_id}-L.jpg" if cover_id else None
     return {
@@ -159,8 +175,8 @@ async def ask_gigachat(prompt: str, token: str):
 # ==================== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ====================
 app = FastAPI(
     title="Гибридная рекомендательная система книг",
-    description="API для гибридных рекомендаций (нейросеть + контентная фильтрация + коллаборативная) + Чат с AI",
-    version="2.1.0"
+    description="API для гибридных рекомендаций (популярность + контент + семантика + коллаборативная) + Чат с AI",
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -172,37 +188,72 @@ app.add_middleware(
 )
 
 data_collector = DataCollector(data_dir="user_data")
-hybrid_recommender = HybridRecommender()
+# Добавляем локальные книги в коллектор
+data_collector.add_books(LOCAL_BOOKS)
 
-try:
-    if hasattr(hybrid_recommender, 'load_all_models'):
-        hybrid_recommender.load_all_models()
-        print("✅ Модели загружены")
-    if hasattr(hybrid_recommender, 'update_collaborative_matrix'):
-        hybrid_recommender.update_collaborative_matrix(data_collector)
-        print("✅ Коллаборативная матрица обновлена")
-except Exception as e:
-    print(f"⚠️  Ошибка при инициализации: {e}")
+recommender = BookRecommender()
+
+# Первоначальное построение системы
+all_interactions = data_collector.get_all_interactions()
+all_books = data_collector.get_all_books()
+if all_books:
+    recommender.build(all_interactions, all_books)
+    print("✅ Рекомендательная система построена")
+else:
+    print("⚠️ Нет книг для построения системы")
 
 # ==================== ЭНДПОИНТЫ ====================
 @app.get("/")
 async def root():
-    collaborative_ready = False
-    if hasattr(hybrid_recommender, 'collaborative_filter'):
-        collaborative_ready = hasattr(hybrid_recommender.collaborative_filter, 'user_book_matrix') \
-                              and hybrid_recommender.collaborative_filter.user_book_matrix is not None
     return {
         "message": "Гибридная рекомендательная система книг с AI-чатом",
-        "version": "2.1.0",
+        "version": "3.0.0",
         "status": "работает",
-        "system_type": "гибридная (нейросеть + контент + коллаборативная) + AI чат",
-        "collaborative_ready": collaborative_ready,
+        "system_type": "гибридная (популярность + контент + семантика + коллаборативная) + AI чат",
         "data_stats": data_collector.get_all_data_stats()
     }
 
+@app.post("/api/add_interaction_with_book")
+async def add_interaction_with_book(interaction: UserInteraction, book_data: BookData):
+    if interaction.book_id != book_data.id:
+        raise HTTPException(status_code=400, detail="book_id in interaction must match book_data.id")
+    """
+    Добавляет взаимодействие (оценку/статус) вместе с данными о книге.
+    """
+    try:
+        # Преобразуем book_data в словарь для сохранения
+        book_dict = book_data.model_dump()
+        data_collector.add_interaction(
+            user_id=interaction.user_id,
+            book_id=interaction.book_id,
+            rating=interaction.rating,
+            status=interaction.status,
+            book_data=book_dict
+        )
+
+        # Перестраиваем рекомендательную систему с новыми данными
+        all_interactions = data_collector.get_all_interactions()
+        all_books = data_collector.get_all_books()
+        recommender.build(all_interactions, all_books)
+
+        return {
+            "status": "success",
+            "message": "Взаимодействие и данные книги добавлены, система обновлена"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Для обратной совместимости оставляем старый эндпоинт
 @app.post("/api/add_interaction")
 async def add_interaction(interaction: UserInteraction):
+    """
+    Устаревший эндпоинт. Рекомендуется использовать /api/add_interaction_with_book.
+    Если книга не была известна ранее, она не будет добавлена.
+    """
     try:
+        # Проверяем, есть ли книга в метаданных
+        if interaction.book_id not in data_collector.books_metadata:
+            raise HTTPException(status_code=400, detail="Книга неизвестна. Используйте /api/add_interaction_with_book")
         data_collector.add_interaction(
             user_id=interaction.user_id,
             book_id=interaction.book_id,
@@ -210,115 +261,65 @@ async def add_interaction(interaction: UserInteraction):
             status=interaction.status,
             book_data=None
         )
-        collaborative_updated = False
-        if hasattr(hybrid_recommender, 'update_collaborative_matrix'):
-            hybrid_recommender.update_collaborative_matrix(data_collector)
-            collaborative_updated = True
-        if interaction.rating > 0:
-            X, y = data_collector.prepare_training_data(interaction.user_id)
-            if X is not None and y is not None and hasattr(hybrid_recommender, 'train_for_user'):
-                loss = hybrid_recommender.train_for_user(
-                    user_id=interaction.user_id,
-                    X=X, y=y,
-                    epochs=30
-                )
-                return {
-                    "status": "success",
-                    "message": "Взаимодействие добавлено, гибридная модель обновлена",
-                    "training_loss": loss,
-                    "collaborative_updated": collaborative_updated
-                }
+        all_interactions = data_collector.get_all_interactions()
+        all_books = data_collector.get_all_books()
+        recommender.build(all_interactions, all_books)
         return {
             "status": "success",
-            "message": "Взаимодействие добавлено",
-            "collaborative_updated": collaborative_updated
+            "message": "Взаимодействие добавлено, система обновлена"
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/add_interaction_with_book")
-async def add_interaction_with_book(interaction: UserInteraction, book_data: BookData):
-    try:
-        data_collector.add_interaction(
-            user_id=interaction.user_id,
-            book_id=interaction.book_id,
-            rating=interaction.rating,
-            status=interaction.status,
-            book_data=book_data.model_dump()
-        )
-        collaborative_updated = False
-        if hasattr(hybrid_recommender, 'update_collaborative_matrix'):
-            hybrid_recommender.update_collaborative_matrix(data_collector)
-            collaborative_updated = True
-        if interaction.rating > 0:
-            X, y = data_collector.prepare_training_data(interaction.user_id)
-            if X is not None and y is not None and hasattr(hybrid_recommender, 'train_for_user'):
-                loss = hybrid_recommender.train_for_user(
-                    user_id=interaction.user_id,
-                    X=X, y=y,
-                    epochs=30
-                )
-                return {
-                    "status": "success",
-                    "message": "Взаимодействие и данные книги добавлены",
-                    "training_loss": loss,
-                    "collaborative_updated": collaborative_updated
-                }
-        return {
-            "status": "success",
-            "message": "Взаимодействие и данные книги добавлены",
-            "collaborative_updated": collaborative_updated
-        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/recommend")
 async def get_hybrid_recommendations(request: RecommendationRequest):
+    """
+    Возвращает гибридные рекомендации на основе истории пользователя.
+    """
     try:
         user_id = request.user_id
         user_interactions = data_collector.get_user_interactions(user_id)
         candidate_books = [book.model_dump() for book in request.candidate_books]
+
         print(f"👤 Пользователь {user_id}: {len(user_interactions)} взаимодействий")
         print(f"📚 Кандидатов: {len(candidate_books)} книг")
-        recommendations, confidences = hybrid_recommender.get_hybrid_recommendations(
+
+        recommendations, confidences = recommender.recommend(
             user_id=user_id,
             candidate_books=candidate_books,
             user_interactions=user_interactions,
-            data_collector=data_collector,
             top_k=request.limit
         )
+
         recommended_books = [BookData(**book) for book in recommendations]
+
         return RecommendationResponse(
             recommendations=recommended_books,
             confidence_scores=confidences,
-            training_data_size=len(user_interactions),
+            training_data_size=len([i for i in user_interactions if i.get('rating',0)>0]),
             message="Гибридные рекомендации"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
+    """Обрабатывает текстовый запрос и возвращает книги через GigaChat и поиск."""
     query = request.get("query", "")
     user_id = request.get("user_id", 0)
 
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
 
-    # Получаем Authorization key из переменных окружения
-    # Получаем Authorization key из переменных окружения
     auth_key = os.getenv("GIGACHAT_AUTH_KEY")
-    print(f"1. Auth key loaded: {'Yes' if auth_key else 'No'}")
-
     if not auth_key:
-        print("2. GigaChat auth key not set, using fallback search")
         criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
     else:
         try:
-            print("3. Attempting to get token from GigaChat...")
             async with httpx.AsyncClient(verify=False) as client:
-                # Шаг 1: Получение токена
+                # Получение токена
                 token_response = await client.post(
                     "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
                     headers={
@@ -328,22 +329,12 @@ async def chat_recommend(request: dict):
                     },
                     data={"scope": "GIGACHAT_API_PERS"}
                 )
-
-                print(f"4. Token response status: {token_response.status_code}")
-
                 if token_response.status_code != 200:
-                    print(f"5. Token error body: {token_response.text}")
                     raise Exception(f"Failed to get token: {token_response.status_code}")
-
                 token_data = token_response.json()
                 access_token = token_data.get("access_token")
-                print(f"6. Token obtained: {'Yes' if access_token else 'No'}")
 
-                if not access_token:
-                    raise Exception("No access_token in response")
-
-                # Шаг 2: Запрос к GigaChat
-                print("7. Sending request to GigaChat API...")
+                # Запрос к GigaChat
                 chat_response = await client.post(
                     "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
                     headers={
@@ -353,53 +344,29 @@ async def chat_recommend(request: dict):
                     json={
                         "model": "GigaChat",
                         "messages": [
-                            {
-                                "role": "system",
-                                "content": "Ты помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска. Ответ должен быть только JSON без лишнего текста."
-                            },
-                            {
-                                "role": "user",
-                                "content": f"Запрос: {query}\nФормат ответа: {{\"genres\": [\"жанр1\", \"жанр2\"], \"keywords\": [\"слово1\", \"слово2\"], \"min_rating\": 0.0, \"max_results\": 10}}"
-                            }
+                            {"role": "system", "content": "Ты помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска. Ответ должен быть только JSON без лишнего текста."},
+                            {"role": "user", "content": f"Запрос: {query}\nФормат ответа: {{\"genres\": [\"жанр1\", \"жанр2\"], \"keywords\": [\"слово1\", \"слово2\"], \"min_rating\": 0.0, \"max_results\": 10}}"}
                         ],
                         "temperature": 0.1,
                         "max_tokens": 512
                     }
                 )
-
-                print(f"8. Chat response status: {chat_response.status_code}")
-
-                if chat_response.status_code != 200:
-                    print(f"9. Chat error body: {chat_response.text}")
-                    raise Exception(f"Chat request failed: {chat_response.status_code}")
-
                 chat_data = chat_response.json()
-                print(f"10. Chat response data keys: {chat_data.keys()}")
-
-                if "choices" in chat_data and len(chat_data["choices"]) > 0:
+                if "choices" in chat_data and chat_data["choices"]:
                     criteria_text = chat_data["choices"][0]["message"]["content"]
-                    print(f"11. GigaChat response text: {criteria_text}")
-
-                    # Извлекаем JSON
                     start = criteria_text.find('{')
                     end = criteria_text.rfind('}') + 1
                     if start != -1 and end > start:
                         criteria = json.loads(criteria_text[start:end])
-                        print(f"12. Parsed criteria: {criteria}")
                     else:
-                        print("13. No JSON found in response")
                         criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
                 else:
-                    print("14. No choices in response")
                     criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
-
         except Exception as e:
-            print(f"15. GigaChat error: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"GigaChat error: {e}")
             criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
 
-    # Поиск книг (такой же, как был)
+    # Поиск книг
     local_results = search_local_books(criteria)
     needed = max(0, criteria.get("max_results", 10) - len(local_results))
     open_library_results = await search_openlibrary(criteria, limit=needed) if needed > 0 else []
@@ -408,17 +375,8 @@ async def chat_recommend(request: dict):
 
 @app.get("/api/user/{user_id}/stats")
 async def get_user_stats(user_id: int):
-    stats = data_collector.get_user_stats(user_id)
-    if not stats:
-        return {
-            "user_id": user_id,
-            "hybrid_system": True,
-            "interactions": 0,
-            "ratings": 0,
-            "recommendation_quality": "базовая (нет истории)"
-        }
     interactions = data_collector.get_user_interactions(user_id)
-    ratings_count = len([i for i in interactions if i['rating'] > 0])
+    ratings_count = len([i for i in interactions if i.get('rating', 0) > 0])
     quality = "базовая"
     if ratings_count >= 5:
         quality = "высокая"
@@ -430,42 +388,26 @@ async def get_user_stats(user_id: int):
         "interactions": len(interactions),
         "ratings": ratings_count,
         "recommendation_quality": quality,
-        **stats
+        **data_collector.get_user_stats(user_id)
     }
 
 @app.get("/api/system/stats")
 async def get_system_stats():
-    collaborative_ready = False
-    collaborative_users = 0
-    collaborative_books = 0
-    if hasattr(hybrid_recommender, 'collaborative_filter'):
-        collaborative_ready = hasattr(hybrid_recommender.collaborative_filter, 'user_book_matrix') \
-                              and hybrid_recommender.collaborative_filter.user_book_matrix is not None
-        if collaborative_ready:
-            collaborative_users = len(hybrid_recommender.collaborative_filter.user_ids)
-            collaborative_books = len(hybrid_recommender.collaborative_filter.book_ids)
+    stats = data_collector.get_all_data_stats()
     return {
-        "system_type": "гибридная (нейросеть + контент + коллаборативная) + AI чат",
-        "data_collector": data_collector.get_all_data_stats(),
-        "neural_models_trained": len(hybrid_recommender.models) if hasattr(hybrid_recommender, 'models') else 0,
-        "total_users": data_collector.stats['unique_users'],
-        "collaborative_filtering_ready": collaborative_ready,
-        "collaborative_users": collaborative_users,
-        "collaborative_books": collaborative_books
+        "system_type": "гибридная (популярность + контент + семантика + коллаборативная) + AI чат",
+        "data_collector": stats,
+        "total_users": stats['unique_users'],
+        "total_books": stats['unique_books'],
+        "collaborative_filtering_ready": recommender.book_similarity is not None
     }
 
 @app.get("/health")
 async def health_check():
-    collaborative_ready = False
-    if hasattr(hybrid_recommender, 'collaborative_filter'):
-        collaborative_ready = hasattr(hybrid_recommender.collaborative_filter, 'user_book_matrix') \
-                              and hybrid_recommender.collaborative_filter.user_book_matrix is not None
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "system_type": "гибридная + AI чат",
-        "neural_models": len(hybrid_recommender.models) if hasattr(hybrid_recommender, 'models') else 0,
-        "collaborative_ready": collaborative_ready,
         "total_interactions": data_collector.stats['total_interactions']
     }
 
@@ -474,36 +416,18 @@ async def clear_user_data(user_id: int):
     try:
         success = data_collector.clear_user_data(user_id)
         if success:
-            if hasattr(hybrid_recommender, 'models'):
-                hybrid_recommender.models.pop(user_id, None)
-            model_path = f"models/user_{user_id}.pth"
-            if os.path.exists(model_path):
-                os.remove(model_path)
-            return {
-                "status": "success",
-                "message": f"Данные пользователя {user_id} очищены"
-            }
+            # Перестраиваем систему после удаления
+            all_interactions = data_collector.get_all_interactions()
+            all_books = data_collector.get_all_books()
+            recommender.build(all_interactions, all_books)
+            return {"status": "success", "message": f"Данные пользователя {user_id} очищены"}
         else:
             raise HTTPException(status_code=500, detail="Ошибка очистки данных")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы версия 2.1 с AI-чатом...")
-    print("📊 Система: Гибридная (нейросеть + контентная + коллаборативная фильтрация) + AI чат")
+    print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы версия 3.0 с AI-чатом...")
+    print("📊 Система: Гибридная (популярность + контент + семантика + коллаборативная) + AI чат")
     print("📊 Статистика данных:", data_collector.get_all_data_stats())
-    if hasattr(hybrid_recommender, 'models'):
-        print(f"🤖 Загружено нейросетевых моделей: {len(hybrid_recommender.models)}")
-    else:
-        print("🤖 Нейросетевые модели: не доступны")
-    if hasattr(hybrid_recommender, 'collaborative_filter'):
-        if hasattr(hybrid_recommender.collaborative_filter, 'user_book_matrix') \
-                and hybrid_recommender.collaborative_filter.user_book_matrix is not None:
-            print("🤝 Коллаборативная фильтрация: ГОТОВА")
-            print(f"   Пользователей в матрице: {len(hybrid_recommender.collaborative_filter.user_ids)}")
-            print(f"   Книг в матрице: {len(hybrid_recommender.collaborative_filter.book_ids)}")
-        else:
-            print("🤝 Коллаборативная фильтрация: НЕ ГОТОВА (нужно больше данных)")
-    else:
-        print("🤝 Коллаборативная фильтрация: не доступна")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
