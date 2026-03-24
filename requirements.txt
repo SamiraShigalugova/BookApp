@@ -6,3 +6,4 @@ numpy
 sqlalchemy[asyncio]
 asyncpg
 pydantic
+psycopg2-binary
