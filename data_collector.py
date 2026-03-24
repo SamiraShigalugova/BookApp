@@ -1,30 +1,80 @@
+# data_collector.py
 import json
 from typing import List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy import select, delete, func
-from database import Base, Book, Interaction
-from collections import defaultdict
+from sqlalchemy import select, delete, func, and_
+from sqlalchemy.orm import declarative_base, Mapped, mapped_column
+from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey
+from sqlalchemy.sql import func as sql_func
+from datetime import datetime
 
+# --- Модели SQLAlchemy ---
+Base = declarative_base()
+
+class BookDB(Base):
+    __tablename__ = "books"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    author: Mapped[str] = mapped_column(String)
+    genre: Mapped[str] = mapped_column(String)
+    tags: Mapped[List[str]] = mapped_column(JSON, default=list)
+    average_rating: Mapped[float] = mapped_column(Float, default=0.0)
+    cover_url: Mapped[str] = mapped_column(String, default="")
+    description: Mapped[str] = mapped_column(String, default="")
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "author": self.author,
+            "genre": self.genre,
+            "tags": self.tags or [],
+            "average_rating": self.average_rating,
+            "cover_url": self.cover_url,
+            "description": self.description,
+        }
+
+class InteractionDB(Base):
+    __tablename__ = "interactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    book_id: Mapped[str] = mapped_column(String, ForeignKey("books.id", ondelete="CASCADE"), nullable=False)
+    rating: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=sql_func.now())
+
+    def to_dict(self) -> Dict:
+        return {
+            "user_id": self.user_id,
+            "book_id": self.book_id,
+            "rating": self.rating,
+            "status": self.status,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+        }
+
+# --- DataCollector ---
 class DataCollector:
     def __init__(self, database_url: str):
+        
         self.engine = create_async_engine(database_url, echo=False)
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False)
-        # Для быстрой статистики (можно пересчитывать каждый раз)
-        self.stats = {"total_interactions": 0, "unique_users": 0, "unique_books": 0}
+        self._stats_cache = {"total_interactions": 0, "unique_users": 0, "unique_books": 0}
 
     async def init_db(self):
         """Создаёт таблицы, если их нет."""
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        # Обновляем статистику
         await self._refresh_stats()
 
     async def _refresh_stats(self):
+        """Обновляет кэш статистики."""
         async with self.async_session() as session:
-            total = await session.scalar(select(func.count(Interaction.id)))
-            users = await session.scalar(select(func.count(Interaction.user_id.distinct())))
-            books = await session.scalar(select(func.count(Interaction.book_id.distinct())))
-            self.stats = {
+            total = await session.scalar(select(func.count(InteractionDB.id)))
+            users = await session.scalar(select(func.count(InteractionDB.user_id.distinct())))
+            books = await session.scalar(select(func.count(InteractionDB.book_id.distinct())))
+            self._stats_cache = {
                 "total_interactions": total or 0,
                 "unique_users": users or 0,
                 "unique_books": books or 0
@@ -34,9 +84,9 @@ class DataCollector:
         """Добавляет или обновляет книги."""
         async with self.async_session() as session:
             for b in books:
-                book = await session.get(Book, b["id"])
+                book = await session.get(BookDB, b["id"])
                 if not book:
-                    book = Book(
+                    book = BookDB(
                         id=b["id"],
                         title=b["title"],
                         author=b.get("author", ""),
@@ -48,7 +98,7 @@ class DataCollector:
                     )
                     session.add(book)
                 else:
-                    # обновляем поля (если нужно)
+                    # обновляем (на случай, если изменились метаданные)
                     book.title = b["title"]
                     book.author = b.get("author", "")
                     book.genre = b.get("genre", "")
@@ -71,11 +121,11 @@ class DataCollector:
         Добавляет взаимодействие. Если передан book_data, книга сохраняется/обновляется.
         """
         async with self.async_session() as session:
-            # если переданы данные книги, сохраняем
+            # сохраняем книгу, если переданы данные
             if book_data:
-                book = await session.get(Book, book_id)
+                book = await session.get(BookDB, book_id)
                 if not book:
-                    book = Book(
+                    book = BookDB(
                         id=book_id,
                         title=book_data["title"],
                         author=book_data.get("author", ""),
@@ -87,7 +137,7 @@ class DataCollector:
                     )
                     session.add(book)
                 else:
-                    # обновляем существующую книгу (например, если изменились поля)
+                    # обновляем (на случай, если изменились метаданные)
                     book.title = book_data["title"]
                     book.author = book_data.get("author", "")
                     book.genre = book_data.get("genre", "")
@@ -95,9 +145,8 @@ class DataCollector:
                     book.average_rating = book_data.get("average_rating", 0.0)
                     book.cover_url = book_data.get("cover_url", "")
                     book.description = book_data.get("description", "")
-
             # добавляем взаимодействие
-            interaction = Interaction(
+            interaction = InteractionDB(
                 user_id=user_id,
                 book_id=book_id,
                 rating=rating,
@@ -108,35 +157,35 @@ class DataCollector:
         await self._refresh_stats()
 
     async def get_user_interactions(self, user_id: int) -> List[Dict]:
-        """Возвращает список взаимодействий пользователя."""
+        """Возвращает все взаимодействия пользователя."""
         async with self.async_session() as session:
             result = await session.execute(
-                select(Interaction).where(Interaction.user_id == user_id)
+                select(InteractionDB).where(InteractionDB.user_id == user_id)
             )
             interactions = result.scalars().all()
             return [i.to_dict() for i in interactions]
 
     async def get_all_interactions(self) -> List[Dict]:
-        """Возвращает все взаимодействия."""
+        """Возвращает все взаимодействия (для построения рекомендательной системы)."""
         async with self.async_session() as session:
-            result = await session.execute(select(Interaction))
+            result = await session.execute(select(InteractionDB))
             interactions = result.scalars().all()
             return [i.to_dict() for i in interactions]
 
     async def get_all_books(self) -> List[Dict]:
         """Возвращает все книги."""
         async with self.async_session() as session:
-            result = await session.execute(select(Book))
+            result = await session.execute(select(BookDB))
             books = result.scalars().all()
             return [b.to_dict() for b in books]
 
     async def get_user_stats(self, user_id: int) -> Dict:
         """Статистика пользователя."""
         async with self.async_session() as session:
-            result = await session.execute(
-                select(Interaction).where(Interaction.user_id == user_id)
+            interactions = await session.execute(
+                select(InteractionDB).where(InteractionDB.user_id == user_id)
             )
-            interactions = result.scalars().all()
+            interactions = interactions.scalars().all()
             ratings = [i.rating for i in interactions if i.rating > 0]
             return {
                 "total_interactions": len(interactions),
@@ -146,15 +195,15 @@ class DataCollector:
             }
 
     async def get_all_data_stats(self) -> Dict:
-        """Общая статистика."""
-        return self.stats
+        """Общая статистика (кэшированная)."""
+        return self._stats_cache
 
     async def clear_user_data(self, user_id: int) -> bool:
         """Удаляет все взаимодействия пользователя."""
         try:
             async with self.async_session() as session:
                 await session.execute(
-                    delete(Interaction).where(Interaction.user_id == user_id)
+                    delete(InteractionDB).where(InteractionDB.user_id == user_id)
                 )
                 await session.commit()
             await self._refresh_stats()
