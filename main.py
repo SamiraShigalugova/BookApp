@@ -1,3 +1,4 @@
+# main.py
 import asyncio
 import os
 import httpx
@@ -9,6 +10,7 @@ import json
 import base64
 import uuid
 from dotenv import load_dotenv
+import re
 
 from data_models import *
 from data_collector import DataCollector
@@ -17,26 +19,27 @@ from recommender import BookRecommender
 load_dotenv()
 
 # ==================== ЗАГРУЗКА ЛОКАЛЬНЫХ КНИГ ====================
+def generate_global_id(title: str, author: str) -> str:
+    """Генерирует globalId так же, как в Android-приложении."""
+    base = f"{title}|{author}".lower()
+    # Оставляем только буквы (русские/английские), цифры и разделитель '|'
+    return re.sub(r'[^a-zа-я0-9|]', '', base)
+
 LOCAL_BOOKS = []
 try:
     with open('local_books.json', 'r', encoding='utf-8') as f:
         raw_books = json.load(f)
-    # Приводим к единому формату
     for i, book in enumerate(raw_books):
-        # ID – строка (как globalId)
-        if 'id' not in book:
-            book['id'] = str(i + 1)
-        else:
-            book['id'] = str(book['id'])
+        # Генерируем id как globalId
+        book['id'] = generate_global_id(book['title'], book['author'])
         book['average_rating'] = book.get('averageRating', book.get('average_rating', 0.0))
         if 'averageRating' in book:
             del book['averageRating']
-        if 'tags' not in book:
-            book['tags'] = []
-        if 'description' not in book:
-            book['description'] = ''
+        book['tags'] = []
+        book['description'] = book.get('description', '')
+        book['cover_url'] = book.get('cover', '')   # преобразуем cover -> cover_url
         LOCAL_BOOKS.append(book)
-    print(f"✅ Загружено {len(LOCAL_BOOKS)} локальных книг")
+    print(f"✅ Загружено {len(LOCAL_BOOKS)} локальных книг с глобальными ID")
 except Exception as e:
     print(f"❌ Ошибка загрузки локальных книг: {e}")
 
@@ -185,20 +188,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-data_collector = DataCollector(data_dir="user_data")
-# Добавляем локальные книги в коллектор
-data_collector.add_books(LOCAL_BOOKS)
-
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/dbname")
+data_collector = DataCollector(DATABASE_URL)
 recommender = BookRecommender()
 
-# Первоначальное построение системы
-all_interactions = data_collector.get_all_interactions()
-all_books = data_collector.get_all_books()
-if all_books:
-    recommender.build(all_interactions, all_books)
+# Стартовый event
+@app.on_event("startup")
+async def startup_event():
+    await data_collector.init_db()
+    # Загружаем локальные книги, если их ещё нет в БД
+    all_books = await data_collector.get_all_books()
+    if not all_books and LOCAL_BOOKS:
+        await data_collector.add_books(LOCAL_BOOKS)
+        print("✅ Локальные книги загружены в базу данных")
+    # Строим рекомендательную систему
+    all_interactions = await data_collector.get_all_interactions()
+    all_books = await data_collector.get_all_books()
+    await asyncio.to_thread(recommender.build, all_interactions, all_books)
     print("✅ Рекомендательная система построена")
-else:
-    print("⚠️ Нет книг для построения системы")
 
 # ==================== ЭНДПОИНТЫ ====================
 @app.get("/")
@@ -208,32 +215,26 @@ async def root():
         "version": "3.0.0",
         "status": "работает",
         "system_type": "гибридная (популярность + контент + семантика + коллаборативная) + AI чат",
-        "data_stats": data_collector.get_all_data_stats()
+        "data_stats": await data_collector.get_all_data_stats()
     }
 
 @app.post("/api/add_interaction_with_book")
 async def add_interaction_with_book(interaction: UserInteraction, book_data: BookData):
     if interaction.book_id != book_data.id:
         raise HTTPException(status_code=400, detail="book_id in interaction must match book_data.id")
-    """
-    Добавляет взаимодействие (оценку/статус) вместе с данными о книге.
-    """
     try:
-        # Преобразуем book_data в словарь для сохранения
         book_dict = book_data.model_dump()
-        data_collector.add_interaction(
+        await data_collector.add_interaction(
             user_id=interaction.user_id,
             book_id=interaction.book_id,
             rating=interaction.rating,
             status=interaction.status,
             book_data=book_dict
         )
-
-        # Перестраиваем рекомендательную систему с новыми данными
-        all_interactions = data_collector.get_all_interactions()
-        all_books = data_collector.get_all_books()
-        recommender.build(all_interactions, all_books)
-
+        # Перестраиваем рекомендательную систему
+        all_interactions = await data_collector.get_all_interactions()
+        all_books = await data_collector.get_all_books()
+        await asyncio.to_thread(recommender.build, all_interactions, all_books)
         return {
             "status": "success",
             "message": "Взаимодействие и данные книги добавлены, система обновлена"
@@ -241,27 +242,24 @@ async def add_interaction_with_book(interaction: UserInteraction, book_data: Boo
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Для обратной совместимости оставляем старый эндпоинт
 @app.post("/api/add_interaction")
 async def add_interaction(interaction: UserInteraction):
-    """
-    Устаревший эндпоинт. Рекомендуется использовать /api/add_interaction_with_book.
-    Если книга не была известна ранее, она не будет добавлена.
-    """
+    """Устаревший эндпоинт. Рекомендуется использовать /api/add_interaction_with_book."""
     try:
         # Проверяем, есть ли книга в метаданных
-        if interaction.book_id not in data_collector.books_metadata:
+        all_books = await data_collector.get_all_books()
+        if interaction.book_id not in [b["id"] for b in all_books]:
             raise HTTPException(status_code=400, detail="Книга неизвестна. Используйте /api/add_interaction_with_book")
-        data_collector.add_interaction(
+        await data_collector.add_interaction(
             user_id=interaction.user_id,
             book_id=interaction.book_id,
             rating=interaction.rating,
             status=interaction.status,
             book_data=None
         )
-        all_interactions = data_collector.get_all_interactions()
-        all_books = data_collector.get_all_books()
-        recommender.build(all_interactions, all_books)
+        all_interactions = await data_collector.get_all_interactions()
+        all_books = await data_collector.get_all_books()
+        await asyncio.to_thread(recommender.build, all_interactions, all_books)
         return {
             "status": "success",
             "message": "Взаимодействие добавлено, система обновлена"
@@ -273,12 +271,9 @@ async def add_interaction(interaction: UserInteraction):
 
 @app.post("/api/recommend")
 async def get_hybrid_recommendations(request: RecommendationRequest):
-    """
-    Возвращает гибридные рекомендации на основе истории пользователя.
-    """
     try:
         user_id = request.user_id
-        user_interactions = data_collector.get_user_interactions(user_id)
+        user_interactions = await data_collector.get_user_interactions(user_id)
         candidate_books = [book.model_dump() for book in request.candidate_books]
 
         print(f"👤 Пользователь {user_id}: {len(user_interactions)} взаимодействий")
@@ -373,25 +368,26 @@ async def chat_recommend(request: dict):
 
 @app.get("/api/user/{user_id}/stats")
 async def get_user_stats(user_id: int):
-    interactions = data_collector.get_user_interactions(user_id)
+    interactions = await data_collector.get_user_interactions(user_id)
     ratings_count = len([i for i in interactions if i.get('rating', 0) > 0])
     quality = "базовая"
     if ratings_count >= 5:
         quality = "высокая"
     elif ratings_count >= 2:
         quality = "средняя"
+    stats = await data_collector.get_user_stats(user_id)
     return {
         "user_id": user_id,
         "hybrid_system": True,
         "interactions": len(interactions),
         "ratings": ratings_count,
         "recommendation_quality": quality,
-        **data_collector.get_user_stats(user_id)
+        **stats
     }
 
 @app.get("/api/system/stats")
 async def get_system_stats():
-    stats = data_collector.get_all_data_stats()
+    stats = await data_collector.get_all_data_stats()
     return {
         "system_type": "гибридная (популярность + контент + семантика + коллаборативная) + AI чат",
         "data_collector": stats,
@@ -406,18 +402,18 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "system_type": "гибридная + AI чат",
-        "total_interactions": data_collector.stats['total_interactions']
+        "total_interactions": (await data_collector.get_all_data_stats())["total_interactions"]
     }
 
 @app.post("/api/clear_user_data/{user_id}")
 async def clear_user_data(user_id: int):
     try:
-        success = data_collector.clear_user_data(user_id)
+        success = await data_collector.clear_user_data(user_id)
         if success:
             # Перестраиваем систему после удаления
-            all_interactions = data_collector.get_all_interactions()
-            all_books = data_collector.get_all_books()
-            recommender.build(all_interactions, all_books)
+            all_interactions = await data_collector.get_all_interactions()
+            all_books = await data_collector.get_all_books()
+            await asyncio.to_thread(recommender.build, all_interactions, all_books)
             return {"status": "success", "message": f"Данные пользователя {user_id} очищены"}
         else:
             raise HTTPException(status_code=500, detail="Ошибка очистки данных")
@@ -427,5 +423,4 @@ async def clear_user_data(user_id: int):
 if __name__ == "__main__":
     print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы версия 3.0 с AI-чатом...")
     print("📊 Система: Гибридная (популярность + контент + семантика + коллаборативная) + AI чат")
-    print("📊 Статистика данных:", data_collector.get_all_data_stats())
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
