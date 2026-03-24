@@ -1,9 +1,10 @@
+# data_models.py
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
 class BookData(BaseModel):
-    id: str                         # строковый идентификатор (globalId)
+    id: str
     title: str
     author: str
     genre: str
@@ -14,7 +15,7 @@ class BookData(BaseModel):
 
 class UserInteraction(BaseModel):
     user_id: int
-    book_id: str                    # строковый идентификатор
+    book_id: str
     rating: float = 0.0
     status: str
     timestamp: Optional[datetime] = None
@@ -29,3 +30,8 @@ class RecommendationResponse(BaseModel):
     confidence_scores: List[float]
     message: str = "Гибридные рекомендации"
     system_type: str = "гибридная"
+
+# Модели для чата и других запросов
+class ChatRequest(BaseModel):
+    query: str
+    user_id: int
