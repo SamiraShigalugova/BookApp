@@ -294,15 +294,14 @@ async def chat_recommend(request: dict):
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
 
+    print(f"📝 Запрос чата: {query}")
+
     auth_key = os.getenv("GIGACHAT_AUTH_KEY")
     if not auth_key:
         criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
     else:
         try:
-            # Получаем токен (client_secret не нужен, так как в auth_key уже есть)
             token = await get_gigachat_token(auth_key, "")
-            
-            # Сокращённый промпт
             system_prompt = """
 Ты – помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска. 
 Извлеки из запроса ТОЛЬКО жанры, ключевые слова и минимальный рейтинг. 
@@ -330,13 +329,10 @@ async def chat_recommend(request: dict):
 
 Теперь обработай запрос и выдай ТОЛЬКО JSON.
 """
-            
-            # Вызываем GigaChat
             response = await ask_gigachat(f"Запрос: {query}", token, system_prompt)
-            
             if "choices" in response and response["choices"]:
                 criteria_text = response["choices"][0]["message"]["content"]
-                import re
+                print(f"🤖 GigaChat ответ: {criteria_text}")
                 json_match = re.search(r'\{[^{}]*\}', criteria_text)
                 if json_match:
                     try:
@@ -347,44 +343,63 @@ async def chat_recommend(request: dict):
                     criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
             else:
                 criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
-                
         except Exception as e:
             print(f"GigaChat error: {e}")
             criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
 
-    # Поиск книг
+    print(f"🔍 Критерии поиска: {criteria}")
+
+    # Поиск локальных книг
     local_results = search_local_books(criteria)
-    
-    # Получаем популярные книги для fallback
-    all_books = await data_collector.get_all_books()
-    popular_books = []
-    if all_books:
-        popular_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:10]
-        popular_books = [book_to_google_book(book) for book in popular_books]
-    
-    # Если есть результаты
+    print(f"📚 Найдено локальных книг: {len(local_results)}")
+
+    # Если локальные книги найдены, используем их, дополняя OpenLibrary
     if local_results:
         needed = max(0, criteria.get("max_results", 10) - len(local_results))
         open_library_results = await search_openlibrary(criteria, limit=needed) if needed > 0 else []
         combined = local_results + open_library_results
-        
+        # Убираем дубликаты
         seen_ids = set()
         unique_results = []
         for book in combined:
             if book["id"] not in seen_ids:
                 seen_ids.add(book["id"])
                 unique_results.append(book)
-        
         return {
             "results": unique_results[:criteria.get("max_results", 10)],
             "is_fallback": False
         }
-    
-    # Если ничего не найдено
+
+    # Если локальных книг нет, пробуем OpenLibrary
+    open_library_results = await search_openlibrary(criteria, limit=criteria.get("max_results", 10))
+    if open_library_results:
+        print(f"📚 Найдено в OpenLibrary: {len(open_library_results)}")
+        return {
+            "results": open_library_results[:criteria.get("max_results", 10)],
+            "is_fallback": True,
+            "fallback_message": f"К сожалению, я не смог найти книги по запросу «{query}». Возможно, вам подойдут эти книги:"
+        }
+
+    # Если ничего не найдено, возвращаем случайные популярные книги из БД
+    all_books = await data_collector.get_all_books()
+    if all_books:
+        # Берём топ-50 по рейтингу и перемешиваем
+        top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:50]
+        import random
+        random.shuffle(top_books)
+        popular_books = [book_to_google_book(book) for book in top_books[:10]]
+        print(f"📚 Fallback: показываем {len(popular_books)} популярных книг")
+        return {
+            "results": popular_books,
+            "is_fallback": True,
+            "fallback_message": f"По запросу «{query}» ничего не найдено. Попробуйте другие ключевые слова. Вот популярные книги:"
+        }
+
+    # Совсем ничего нет
     return {
-        "results": popular_books[:10],
+        "results": [],
         "is_fallback": True,
-        "fallback_message": f"К сожалению, я не смог найти книги по запросу «{query}». Возможно, вам подойдут эти популярные книги:"
+        "fallback_message": "Извините, ничего не найдено. Попробуйте изменить запрос."
     }
 
 @app.get("/api/user/{user_id}/stats")
