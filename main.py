@@ -1,10 +1,11 @@
-# main.py
+# main.py 
 import asyncio
 import os
 import re
 import json
 import base64
 import uuid
+import random  # добавим для перемешивания
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +56,12 @@ def search_local_books(criteria: dict) -> list:
     min_rating = criteria.get("min_rating", 0)
     max_results = criteria.get("max_results", 10)
 
+    # Если нет ни жанров, ни ключевых слов – вернуть случайные книги
+    if not genres and not keywords:
+        all_books = list(LOCAL_BOOKS)  # копия
+        random.shuffle(all_books)
+        return [book_to_google_book(book) for book in all_books[:max_results]]
+
     results = []
     for book in LOCAL_BOOKS:
         score = 0
@@ -90,25 +97,42 @@ def book_to_google_book(book: dict) -> dict:
     }
 
 async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
-    query_parts = []
-    if criteria.get("genres"):
-        for g in criteria["genres"]:
+    genres = criteria.get("genres", [])
+    keywords = criteria.get("keywords", [])
+    # Если нет критериев – ищем "popular" и перемешиваем
+    if not genres and not keywords:
+        query = "popular"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://openlibrary.org/search.json",
+                    params={"q": query, "limit": limit * 2, "fields": "key,title,author_name,subject,ratings_average,cover_i"}
+                )
+                data = response.json()
+                docs = data.get("docs", [])
+                random.shuffle(docs)
+                return [openlibrary_to_google_book(doc) for doc in docs[:limit]]
+        except Exception as e:
+            print(f"OpenLibrary error: {e}")
+            return []
+    else:
+        query_parts = []
+        for g in genres:
             query_parts.append(f"subject:{g}")
-    if criteria.get("keywords"):
-        query_parts.append(" ".join(criteria["keywords"]))
-    query = " ".join(query_parts) if query_parts else "popular"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://openlibrary.org/search.json",
-                params={"q": query, "limit": limit, "fields": "key,title,author_name,subject,ratings_average,cover_i"}
-            )
-            data = response.json()
-            return [openlibrary_to_google_book(doc) for doc in data.get("docs", [])]
-    except Exception as e:
-        print(f"OpenLibrary error: {e}")
-        return []
+        if keywords:
+            query_parts.append(" ".join(keywords))
+        query = " ".join(query_parts)
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://openlibrary.org/search.json",
+                    params={"q": query, "limit": limit, "fields": "key,title,author_name,subject,ratings_average,cover_i"}
+                )
+                data = response.json()
+                return [openlibrary_to_google_book(doc) for doc in data.get("docs", [])]
+        except Exception as e:
+            print(f"OpenLibrary error: {e}")
+            return []
 
 def openlibrary_to_google_book(doc: dict) -> dict:
     cover_id = doc.get("cover_i")
@@ -155,14 +179,12 @@ async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
         "Content-Type": "application/json"
     }
     
-    # Если передан свой system_prompt, используем его, иначе стандартный
     if system_prompt is None:
         system_prompt = """
 Ты – помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска. 
 Извлеки из запроса ТОЛЬКО жанры, ключевые слова и минимальный рейтинг. 
 Ответь ТОЛЬКО JSON, без пояснений.
 """
-    
     payload = {
         "model": "GigaChat",
         "messages": [
@@ -330,6 +352,7 @@ async def chat_recommend(request: dict):
 Теперь обработай запрос и выдай ТОЛЬКО JSON.
 """
             response = await ask_gigachat(f"Запрос: {query}", token, system_prompt)
+            print(f"🤖 GigaChat RAW response: {response}")  # Логирование
             if "choices" in response and response["choices"]:
                 criteria_text = response["choices"][0]["message"]["content"]
                 print(f"🤖 GigaChat ответ: {criteria_text}")
@@ -385,7 +408,6 @@ async def chat_recommend(request: dict):
     if all_books:
         # Берём топ-50 по рейтингу и перемешиваем
         top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:50]
-        import random
         random.shuffle(top_books)
         popular_books = [book_to_google_book(book) for book in top_books[:10]]
         print(f"📚 Fallback: показываем {len(popular_books)} популярных книг")
