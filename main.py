@@ -391,6 +391,11 @@ async def add_interaction_with_book(interaction: UserInteraction, book_data: Boo
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/books")
+async def get_all_books():
+    books = await data_collector.get_all_books()
+    return books
+
 @app.post("/api/add_interaction")
 async def add_interaction(interaction: UserInteraction):
     try:
