@@ -6,11 +6,14 @@ import base64
 import uuid
 import random
 import httpx
+import hashlib
+from typing import Optional
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from datetime import datetime
 from dotenv import load_dotenv
+from pydantic import BaseModel, EmailStr
 
 from data_models import *
 from data_collector import DataCollector
@@ -56,7 +59,6 @@ def search_local_books(criteria: dict) -> list:
     min_rating = criteria.get("min_rating", 0)
     max_results = criteria.get("max_results", 10)
 
-    # Если нет ни жанров, ни ключевых слов, ни авторов – вернуть случайные книги
     if not genres and not keywords and not authors:
         all_books = list(LOCAL_BOOKS)
         random.shuffle(all_books)
@@ -104,7 +106,6 @@ async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
     authors = criteria.get("authors", [])
 
     if not genres and not keywords and not authors:
-        # Нет критериев – ищем "popular" и перемешиваем
         query = "popular"
         try:
             async with httpx.AsyncClient() as client:
@@ -120,7 +121,6 @@ async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
             print(f"OpenLibrary error: {e}")
             return []
     else:
-        # Обычный поиск
         query_parts = []
         for g in genres:
             query_parts.append(f"subject:{g}")
@@ -159,26 +159,18 @@ def openlibrary_to_google_book(doc: dict) -> dict:
     }
 
 # ==================== ФУНКЦИИ ДЛЯ GIGACHAT ====================
-# ==================== ФУНКЦИИ ДЛЯ GIGACHAT ====================
 _cached_token = None
 _token_expiry = 0
 
-async def get_gigachat_token():
-    """
-    Получение токена доступа GigaChat.
-    Использует готовый Authorization key из переменной GIGACHAT_AUTH_KEY.
-    """
-    auth_key = os.getenv("GIGACHAT_AUTH_KEY")   # готовый base64 ключ
-    if not auth_key:
-        raise Exception("GIGACHAT_AUTH_KEY is not set")
-    
+async def get_gigachat_token(client_id: str, client_secret: str):
+    credentials = f"{client_id}:{client_secret}"
+    auth_header = base64.b64encode(credentials.encode()).decode()
     headers = {
-        "Authorization": f"Basic {auth_key}",
+        "Authorization": f"Basic {auth_header}",
         "RqUID": str(uuid.uuid4()),
         "Content-Type": "application/x-www-form-urlencoded"
     }
     data = {"scope": "GIGACHAT_API_PERS"}
-    
     async with httpx.AsyncClient(verify=False) as client:
         response = await client.post(
             "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
@@ -186,30 +178,11 @@ async def get_gigachat_token():
             data=data,
             timeout=30.0
         )
-    
     if response.status_code != 200:
         error_details = f"status={response.status_code}, body={response.text}"
         raise Exception(f"GigaChat token error: {error_details}")
-    
     token_data = response.json()
     return token_data["access_token"]
-
-async def get_cached_token():
-    global _cached_token, _token_expiry
-    import time
-    
-    if _cached_token and time.time() < _token_expiry:
-        return _cached_token
-    
-    try:
-        token = await get_gigachat_token()
-        _cached_token = token
-        _token_expiry = time.time() + 28 * 60   # 28 минут
-        print("✅ GigaChat token получен и закэширован")
-        return token
-    except Exception as e:
-        print(f"❌ Ошибка получения токена GigaChat: {e}")
-        raise
 
 async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
     headers = {
@@ -237,6 +210,20 @@ async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
         raise Exception(f"GigaChat request failed: {response.status_code}")
     return response.json()
 
+async def get_cached_token():
+    global _cached_token, _token_expiry
+    import time
+    if _cached_token and time.time() < _token_expiry:
+        return _cached_token
+    client_id = os.getenv("GIGACHAT_CLIENT_ID")
+    client_secret = os.getenv("GIGACHAT_AUTH_KEY")
+    if not client_id or not client_secret:
+        raise Exception("GIGACHAT_CLIENT_ID and GIGACHAT_AUTH_KEY are not set")
+    token = await get_gigachat_token(client_id, client_secret)
+    _cached_token = token
+    _token_expiry = time.time() + 28 * 60
+    print("✅ GigaChat token получен и закэширован")
+    return token
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ====================
 app = FastAPI(
@@ -268,7 +255,112 @@ async def startup_event():
     await asyncio.to_thread(recommender.build, all_interactions, all_books)
     print("✅ Рекомендательная система построена")
 
-# ==================== ЭНДПОИНТЫ ====================
+# ==================== ЭНДПОИНТЫ ПОЛЬЗОВАТЕЛЕЙ ====================
+class RegisterRequest(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class UserResponse(BaseModel):
+    id: int
+    username: str
+    email: str
+    created_at: datetime
+    last_login: Optional[datetime] = None
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+@app.post("/api/register", response_model=UserResponse)
+async def register(request: RegisterRequest):
+    existing = await data_collector.get_user_by_username(request.username)
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    existing_email = await data_collector.get_user_by_email(request.email)
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    password_hash = hash_password(request.password)
+    user_id = await data_collector.create_user(request.username, request.email, password_hash)
+    user = await data_collector.get_user_by_id(user_id)
+    return UserResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        created_at=user.created_at,
+        last_login=user.last_login
+    )
+
+@app.post("/api/login")
+async def login(request: LoginRequest):
+    user = await data_collector.get_user_by_username(request.username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user.password_hash != hash_password(request.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    await data_collector.update_last_login(user.id)
+    return {"user_id": user.id, "username": user.username}
+
+@app.get("/api/user/{user_id}/books")
+async def get_user_books(user_id: int):
+    interactions = await data_collector.get_user_interactions(user_id)
+    books = {b["id"]: b for b in await data_collector.get_all_books()}
+    result = []
+    for inter in interactions:
+        book = books.get(inter["book_id"])
+        if book:
+            result.append({
+                "book_id": book["id"],
+                "title": book["title"],
+                "author": book["author"],
+                "genre": book["genre"],
+                "cover_url": book["cover_url"],
+                "average_rating": book["average_rating"],
+                "status": inter["status"],
+                "user_rating": inter["rating"],
+                "global_id": book["id"]
+            })
+    return result
+
+class UserBookUpdate(BaseModel):
+    global_id: str
+    title: str
+    author: str
+    genre: str
+    cover_url: str = ""
+    description: str = ""
+    status: str
+    rating: float = 0.0
+
+@app.post("/api/user/{user_id}/book")
+async def update_user_book(user_id: int, request: UserBookUpdate):
+    book_data = {
+        "id": request.global_id,
+        "title": request.title,
+        "author": request.author,
+        "genre": request.genre,
+        "cover_url": request.cover_url,
+        "description": request.description,
+        "average_rating": 0.0,
+        "tags": []
+    }
+    await data_collector.add_interaction(
+        user_id=user_id,
+        book_id=request.global_id,
+        rating=request.rating,
+        status=request.status,
+        book_data=book_data
+    )
+    all_interactions = await data_collector.get_all_interactions()
+    all_books = await data_collector.get_all_books()
+    await asyncio.to_thread(recommender.build, all_interactions, all_books)
+    return {"status": "ok"}
+
+# ==================== ОСТАЛЬНЫЕ ЭНДПОИНТЫ ====================
 @app.get("/")
 async def root():
     return {
@@ -346,16 +438,12 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
 
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
-    print("DEBUG: Начало обработки запроса")
-    print(f"DEBUG: GIGACHAT_CLIENT_ID = {os.getenv('GIGACHAT_CLIENT_ID')}")
-    print(f"DEBUG: GIGACHAT_AUTH_KEY = {os.getenv('GIGACHAT_AUTH_KEY')}")
     query = request.get("query", "")
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
 
     print(f"📝 Запрос чата: {query}")
 
-    # Улучшенный промпт для GigaChat
     system_prompt = """
 Ты – интеллектуальный помощник по поиску книг. Твоя задача – извлечь из запроса пользователя структурированные критерии поиска и вернуть их в виде JSON. Не добавляй пояснений, только JSON.
 
@@ -414,31 +502,26 @@ async def chat_recommend(request: dict):
     except Exception as e:
         print(f"❌ Ошибка GigaChat: {e}")
 
-
     # Поиск локальных книг
     local_results = search_local_books(criteria)
     print(f"📚 Найдено локальных книг: {len(local_results)}")
 
-    # Если локальные книги найдены, используем их, дополняя OpenLibrary
     if local_results:
         needed = max(0, criteria.get("max_results", 10) - len(local_results))
         open_library_results = await search_openlibrary(criteria, limit=needed) if needed > 0 else []
         combined = local_results + open_library_results
-        # Убираем дубликаты по id
         seen_ids = set()
         unique_results = []
         for book in combined:
             if book["id"] not in seen_ids:
                 seen_ids.add(book["id"])
                 unique_results.append(book)
-        # Перемешиваем, чтобы избежать повторения
         random.shuffle(unique_results)
         return {
             "results": unique_results[:criteria.get("max_results", 10)],
             "is_fallback": False
         }
 
-    # Если локальных книг нет, пробуем OpenLibrary
     open_library_results = await search_openlibrary(criteria, limit=criteria.get("max_results", 10))
     if open_library_results:
         print(f"📚 Найдено в OpenLibrary: {len(open_library_results)}")
@@ -449,10 +532,8 @@ async def chat_recommend(request: dict):
             "fallback_message": f"К сожалению, я не смог найти книги по запросу «{query}». Возможно, вам подойдут эти книги:"
         }
 
-    # Если ничего не найдено, возвращаем случайные популярные книги из БД
     all_books = await data_collector.get_all_books()
     if all_books:
-        # Берём топ-50 по рейтингу и перемешиваем
         top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:50]
         random.shuffle(top_books)
         popular_books = [book_to_google_book(book) for book in top_books[:10]]
@@ -463,7 +544,6 @@ async def chat_recommend(request: dict):
             "fallback_message": f"По запросу «{query}» ничего не найдено. Попробуйте другие ключевые слова. Вот популярные книги:"
         }
 
-    # Совсем ничего нет
     return {
         "results": [],
         "is_fallback": True,
@@ -522,31 +602,6 @@ async def clear_user_data(user_id: int):
             raise HTTPException(status_code=500, detail="Ошибка очистки данных")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/register")
-async def register(request: RegisterRequest):
-    # Проверка существования пользователя
-    existing = await data_collector.get_user_by_username(request.username)
-    if existing:
-        raise HTTPException(status_code=400, detail="Username already taken")
-    # Здесь нужна функция хэширования пароля (например, bcrypt)
-    # Для простоты используем тот же метод, что и в AuthRepository (SHA-256 base64)
-    import hashlib, base64
-    password_hash = base64.b64encode(hashlib.sha256(request.password.encode()).digest()).decode()
-    user_id = await data_collector.create_user(request.username, request.email, password_hash)
-    return UserResponse(id=user_id, username=request.username, email=request.email, created_at=datetime.now())
-
-@app.post("/api/login")
-async def login(request: LoginRequest):
-    user = await data_collector.get_user_by_username(request.username)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    # Проверка пароля (хэш)
-    password_hash = base64.b64encode(hashlib.sha256(request.password.encode()).digest()).decode()
-    if user.password_hash != password_hash:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    await data_collector.update_last_login(user.id)
-    return UserResponse(id=user.id, username=user.username, email=user.email, created_at=user.created_at)
 
 if __name__ == "__main__":
     print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы...")
