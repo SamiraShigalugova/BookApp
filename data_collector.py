@@ -120,6 +120,7 @@ class DataCollector:
                     book.cover_url = b.get("cover_url", "")
                     book.description = b.get("description", "")
             await session.commit()
+            print(f"✅ Добавлено {len(books)} книг в базу")
         await self._refresh_stats()
 
     async def add_interaction(
