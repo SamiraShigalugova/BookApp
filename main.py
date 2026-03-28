@@ -357,6 +357,9 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
 
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
+    print("DEBUG: Начало обработки запроса")
+    print(f"DEBUG: GIGACHAT_CLIENT_ID = {os.getenv('GIGACHAT_CLIENT_ID')}")
+    print(f"DEBUG: GIGACHAT_AUTH_KEY = {os.getenv('GIGACHAT_AUTH_KEY')}")
     query = request.get("query", "")
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
