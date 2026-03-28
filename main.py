@@ -159,18 +159,21 @@ def openlibrary_to_google_book(doc: dict) -> dict:
     }
 
 # ==================== ФУНКЦИИ ДЛЯ GIGACHAT ====================
+# ==================== ФУНКЦИИ ДЛЯ GIGACHAT ====================
 _cached_token = None
 _token_expiry = 0
 
-async def get_gigachat_token(client_id: str, client_secret: str):
+async def get_gigachat_token():
     """
     Получение токена доступа GigaChat.
-    Возвращает access_token.
+    Использует готовый Authorization key из переменной GIGACHAT_AUTH_KEY.
     """
-    credentials = f"{client_id}:{client_secret}"
-    auth_header = base64.b64encode(credentials.encode()).decode()
+    auth_key = os.getenv("GIGACHAT_AUTH_KEY")   # готовый base64 ключ
+    if not auth_key:
+        raise Exception("GIGACHAT_AUTH_KEY is not set")
+    
     headers = {
-        "Authorization": f"Basic {auth_header}",
+        "Authorization": f"Basic {auth_key}",
         "RqUID": str(uuid.uuid4()),
         "Content-Type": "application/x-www-form-urlencoded"
     }
@@ -184,13 +187,29 @@ async def get_gigachat_token(client_id: str, client_secret: str):
             timeout=30.0
         )
     
-    # Подробное логирование ошибки
     if response.status_code != 200:
         error_details = f"status={response.status_code}, body={response.text}"
         raise Exception(f"GigaChat token error: {error_details}")
     
     token_data = response.json()
     return token_data["access_token"]
+
+async def get_cached_token():
+    global _cached_token, _token_expiry
+    import time
+    
+    if _cached_token and time.time() < _token_expiry:
+        return _cached_token
+    
+    try:
+        token = await get_gigachat_token()
+        _cached_token = token
+        _token_expiry = time.time() + 28 * 60   # 28 минут
+        print("✅ GigaChat token получен и закэширован")
+        return token
+    except Exception as e:
+        print(f"❌ Ошибка получения токена GigaChat: {e}")
+        raise
 
 async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
     headers = {
@@ -218,36 +237,6 @@ async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
         raise Exception(f"GigaChat request failed: {response.status_code}")
     return response.json()
 
-
-
-async def get_cached_token():
-    """
-    Возвращает закэшированный токен, если он ещё действителен,
-    иначе запрашивает новый.
-    """
-    global _cached_token, _token_expiry
-    import time
-    
-    # Если токен есть и не истёк
-    if _cached_token and time.time() < _token_expiry:
-        return _cached_token
-    
-    # Получаем переменные окружения
-    client_id = os.getenv("GIGACHAT_CLIENT_ID")
-    client_secret = os.getenv("GIGACHAT_AUTH_KEY")
-    
-    if not client_id or not client_secret:
-        raise Exception("GIGACHAT_CLIENT_ID and GIGACHAT_AUTH_KEY are not set in environment")
-    
-    try:
-        token = await get_gigachat_token(client_id, client_secret)
-        _cached_token = token
-        _token_expiry = time.time() + 28 * 60   # 28 минут (чуть меньше 30)
-        print("✅ GigaChat token получен и закэширован")
-        return token
-    except Exception as e:
-        print(f"❌ Ошибка получения токена GigaChat: {e}")
-        raise
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ====================
 app = FastAPI(
