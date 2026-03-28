@@ -122,43 +122,57 @@ class DataCollector:
             await session.commit()
         await self._refresh_stats()
 
-    async def add_interaction(
-        self,
-        user_id: int,
-        book_id: str,
-        rating: float = 0.0,
-        status: str = "rated",
-        book_data: Dict = None
-    ):
-        """
-        Добавляет взаимодействие. Если передан book_data, книга сохраняется/обновляется.
-        """
-        async with self.async_session() as session:
-            # сохраняем книгу, если переданы данные
-            if book_data:
-                book = await session.get(BookDB, book_id)
-                if not book:
-                    book = BookDB(
-                        id=book_id,
-                        title=book_data["title"],
-                        author=book_data.get("author", ""),
-                        genre=book_data.get("genre", ""),
-                        tags=book_data.get("tags", []),
-                        average_rating=book_data.get("average_rating", 0.0),
-                        cover_url=book_data.get("cover_url", ""),
-                        description=book_data.get("description", ""),
-                    )
-                    session.add(book)
-                else:
-                    # обновляем (на случай, если изменились метаданные)
-                    book.title = book_data["title"]
-                    book.author = book_data.get("author", "")
-                    book.genre = book_data.get("genre", "")
-                    book.tags = book_data.get("tags", [])
-                    book.average_rating = book_data.get("average_rating", 0.0)
-                    book.cover_url = book_data.get("cover_url", "")
-                    book.description = book_data.get("description", "")
-            # добавляем взаимодействие
+ async def add_interaction(
+    self,
+    user_id: int,
+    book_id: str,
+    rating: float = 0.0,
+    status: str = "rated",
+    book_data: Dict = None
+):
+    async with self.async_session() as session:
+        # Сохраняем/обновляем книгу
+        if book_data:
+            book = await session.get(BookDB, book_id)
+            if not book:
+                book = BookDB(
+                    id=book_id,
+                    title=book_data["title"],
+                    author=book_data.get("author", ""),
+                    genre=book_data.get("genre", ""),
+                    tags=book_data.get("tags", []),
+                    average_rating=book_data.get("average_rating", 0.0),
+                    cover_url=book_data.get("cover_url", ""),
+                    description=book_data.get("description", ""),
+                )
+                session.add(book)
+            else:
+                # обновляем метаданные
+                book.title = book_data["title"]
+                book.author = book_data.get("author", "")
+                book.genre = book_data.get("genre", "")
+                book.tags = book_data.get("tags", [])
+                book.average_rating = book_data.get("average_rating", 0.0)
+                book.cover_url = book_data.get("cover_url", "")
+                book.description = book_data.get("description", "")
+
+        # Проверяем существующее взаимодействие
+        from sqlalchemy import select
+        stmt = select(InteractionDB).where(
+            InteractionDB.user_id == user_id,
+            InteractionDB.book_id == book_id
+        )
+        result = await session.execute(stmt)
+        existing = result.scalar_one_or_none()
+
+        if existing:
+            # Обновляем
+            existing.rating = rating
+            existing.status = status
+            # Если хотите обновлять timestamp, добавьте:
+            # existing.timestamp = datetime.now(timezone.utc)
+        else:
+            # Создаём новое
             interaction = InteractionDB(
                 user_id=user_id,
                 book_id=book_id,
@@ -166,8 +180,9 @@ class DataCollector:
                 status=status
             )
             session.add(interaction)
-            await session.commit()
-        await self._refresh_stats()
+
+        await session.commit()
+    await self._refresh_stats()
 
     async def get_user_interactions(self, user_id: int) -> List[Dict]:
         """Возвращает все взаимодействия пользователя."""
