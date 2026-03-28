@@ -608,6 +608,51 @@ async def clear_user_data(user_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# Добавить модель для обновления профиля
+class ProfileUpdateRequest(BaseModel):
+    username: str
+    email: str
+
+@app.put("/api/user/{user_id}/profile")
+async def update_profile(user_id: int, request: ProfileUpdateRequest):
+    """
+    Обновляет имя пользователя и email.
+    """
+    try:
+        # Проверяем, существует ли пользователь
+        user = await data_collector.get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Проверяем, не занято ли новое имя другим пользователем
+        existing_user = await data_collector.get_user_by_username(request.username)
+        if existing_user and existing_user.id != user_id:
+            raise HTTPException(status_code=400, detail="Username already taken")
+        
+        # Проверяем, не занят ли email другим пользователем
+        existing_email = await data_collector.get_user_by_email(request.email)
+        if existing_email and existing_email.id != user_id:
+            raise HTTPException(status_code=400, detail="Email already registered")
+        
+        # Обновляем пользователя
+        async with data_collector.async_session() as session:
+            user.username = request.username
+            user.email = request.email
+            await session.commit()
+            await session.refresh(user)
+        
+        return {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "created_at": user.created_at,
+            "last_login": user.last_login
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы...")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
