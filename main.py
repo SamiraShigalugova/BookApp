@@ -1,11 +1,10 @@
-# main.py 
 import asyncio
 import os
 import re
 import json
 import base64
 import uuid
-import random  # добавим для перемешивания
+import random
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,12 +52,13 @@ except Exception as e:
 def search_local_books(criteria: dict) -> list:
     genres = [g.lower() for g in criteria.get("genres", [])]
     keywords = [k.lower() for k in criteria.get("keywords", [])]
+    authors = [a.lower() for a in criteria.get("authors", [])]
     min_rating = criteria.get("min_rating", 0)
     max_results = criteria.get("max_results", 10)
 
-    # Если нет ни жанров, ни ключевых слов – вернуть случайные книги
-    if not genres and not keywords:
-        all_books = list(LOCAL_BOOKS)  # копия
+    # Если нет ни жанров, ни ключевых слов, ни авторов – вернуть случайные книги
+    if not genres and not keywords and not authors:
+        all_books = list(LOCAL_BOOKS)
         random.shuffle(all_books)
         return [book_to_google_book(book) for book in all_books[:max_results]]
 
@@ -67,7 +67,9 @@ def search_local_books(criteria: dict) -> list:
         score = 0
         book_genre = book.get("genre", "").lower()
         if genres and any(g in book_genre for g in genres):
-            score += 2
+            score += 3
+        if authors and any(a in book.get("author", "").lower() for a in authors):
+            score += 3
         text = (book.get("title", "") + " " + book.get("description", "")).lower()
         for kw in keywords:
             if kw in text:
@@ -99,8 +101,10 @@ def book_to_google_book(book: dict) -> dict:
 async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
     genres = criteria.get("genres", [])
     keywords = criteria.get("keywords", [])
-    # Если нет критериев – ищем "popular" и перемешиваем
-    if not genres and not keywords:
+    authors = criteria.get("authors", [])
+
+    if not genres and not keywords and not authors:
+        # Нет критериев – ищем "popular" и перемешиваем
         query = "popular"
         try:
             async with httpx.AsyncClient() as client:
@@ -116,9 +120,12 @@ async def search_openlibrary(criteria: dict, limit: int = 5) -> list:
             print(f"OpenLibrary error: {e}")
             return []
     else:
+        # Обычный поиск
         query_parts = []
         for g in genres:
             query_parts.append(f"subject:{g}")
+        for a in authors:
+            query_parts.append(f"author:{a}")
         if keywords:
             query_parts.append(" ".join(keywords))
         query = " ".join(query_parts)
@@ -173,18 +180,12 @@ async def get_gigachat_token(client_id: str, client_secret: str):
     return token_data["access_token"]
 
 async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
-    """Универсальная функция для запросов к GigaChat"""
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
-    
     if system_prompt is None:
-        system_prompt = """
-Ты – помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска. 
-Извлеки из запроса ТОЛЬКО жанры, ключевые слова и минимальный рейтинг. 
-Ответь ТОЛЬКО JSON, без пояснений.
-"""
+        system_prompt = "Ты – помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска."
     payload = {
         "model": "GigaChat",
         "messages": [
@@ -318,59 +319,71 @@ async def chat_recommend(request: dict):
 
     print(f"📝 Запрос чата: {query}")
 
+    # Улучшенный промпт для GigaChat
+    system_prompt = """
+Ты – интеллектуальный помощник по поиску книг. Твоя задача – извлечь из запроса пользователя структурированные критерии поиска и вернуть их в виде JSON. Не добавляй пояснений, только JSON.
+
+Вот возможные поля:
+- "genres": список жанров (например, ["фэнтези", "детектив"]). Жанры могут быть на русском или английском. Переводи их в русский.
+- "authors": список авторов (имена на русском или английском, переводи на русский).
+- "keywords": список ключевых слов из запроса (например, ["любовь", "приключения"]).
+- "min_rating": минимальный рейтинг (число от 0 до 5). Если не указан, ставь 0.
+- "max_results": максимальное количество книг (число). По умолчанию 10.
+
+Если запрос содержит фразы вроде "похожие на [книга/автор]" – попробуй извлечь жанры/автора той книги (если знаешь). Если не уверен, оставь пустым.
+
+Примеры запросов и ожидаемых JSON:
+
+Запрос: "Хочу почитать фэнтези про драконов"
+Ответ: {"genres": ["фэнтези"], "keywords": ["драконы"], "min_rating": 0, "max_results": 10}
+
+Запрос: "Порекомендуй детективы Агаты Кристи"
+Ответ: {"genres": ["детектив"], "authors": ["Агата Кристи"], "keywords": [], "min_rating": 0, "max_results": 10}
+
+Запрос: "Что-то страшное с высоким рейтингом"
+Ответ: {"genres": ["ужасы", "триллер"], "keywords": [], "min_rating": 4.0, "max_results": 10}
+
+Запрос: "Книги про космос и будущее"
+Ответ: {"genres": ["научная фантастика"], "keywords": ["космос", "будущее"], "min_rating": 0, "max_results": 10}
+
+Запрос: "Интересные книги"
+Ответ: {"genres": [], "authors": [], "keywords": ["интересные"], "min_rating": 0, "max_results": 10}
+
+Теперь обработай следующий запрос и выдай ТОЛЬКО JSON.
+"""
+
     auth_key = os.getenv("GIGACHAT_AUTH_KEY")
-    if not auth_key:
-        criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
-    else:
+    criteria = {"genres": [], "authors": [], "keywords": [], "min_rating": 0, "max_results": 10}
+
+    if auth_key:
         try:
             token = await get_gigachat_token(auth_key, "")
-            system_prompt = """
-Ты – помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска. 
-Извлеки из запроса ТОЛЬКО жанры, ключевые слова и минимальный рейтинг. 
-Ответь ТОЛЬКО JSON, без пояснений.
+            response = await ask_gigachat(query, token, system_prompt)
+            print(f"🤖 GigaChat raw response: {response}")
 
-=== ЖАНРЫ ===
-романтика, фэнтези, научная фантастика, детектив, триллер, ужасы, приключения, 
-классика, исторический роман, биография, поэзия, драма, юмор, сатира, 
-философия, психология, саморазвитие, бизнес, программирование, математика, 
-научно-популярная литература, путешествия, young adult
-
-=== СООТВЕТСТВИЯ ===
-"страшное, жуткое, хоррор" → ужасы, триллер
-"любовь, роман, нежные чувства" → романтика
-"фантастика, космос, будущее" → научная фантастика
-"детектив, загадка, расследование" → детектив
-"саморазвитие, мотивация, успех" → саморазвитие
-"бизнес, стартап, предпринимательство" → бизнес
-"программирование, код, it" → программирование
-"путешествия, страны, отпуск" → путешествия
-"для подростков" → young adult
-
-=== ФОРМАТ ОТВЕТА ===
-{"genres": ["жанр1"], "keywords": ["слово1"], "min_rating": 0, "max_results": 10}
-
-Теперь обработай запрос и выдай ТОЛЬКО JSON.
-"""
-            response = await ask_gigachat(f"Запрос: {query}", token, system_prompt)
-            print(f"🤖 GigaChat RAW response: {response}")  # Логирование
             if "choices" in response and response["choices"]:
-                criteria_text = response["choices"][0]["message"]["content"]
-                print(f"🤖 GigaChat ответ: {criteria_text}")
-                json_match = re.search(r'\{[^{}]*\}', criteria_text)
+                content = response["choices"][0]["message"]["content"]
+                print(f"🤖 GigaChat content: {content}")
+
+                # Ищем JSON в ответе
+                json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
                 if json_match:
                     try:
-                        criteria = json.loads(json_match.group())
-                    except:
-                        criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
+                        parsed = json.loads(json_match.group())
+                        criteria.update(parsed)
+                        print(f"✅ Распознанные критерии: {criteria}")
+                    except Exception as e:
+                        print(f"❌ Ошибка парсинга JSON: {e}")
                 else:
-                    criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
+                    print("⚠️ GigaChat не вернул JSON")
             else:
-                criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
+                print("⚠️ GigaChat вернул пустой ответ")
         except Exception as e:
-            print(f"GigaChat error: {e}")
-            criteria = {"genres": [], "keywords": [], "min_rating": 0, "max_results": 10}
+            print(f"❌ Ошибка GigaChat: {e}")
+    else:
+        print("⚠️ GIGACHAT_AUTH_KEY не задан, используем пустые критерии")
 
-    print(f"🔍 Критерии поиска: {criteria}")
+    print(f"🔍 Финальные критерии поиска: {criteria}")
 
     # Поиск локальных книг
     local_results = search_local_books(criteria)
@@ -381,13 +394,15 @@ async def chat_recommend(request: dict):
         needed = max(0, criteria.get("max_results", 10) - len(local_results))
         open_library_results = await search_openlibrary(criteria, limit=needed) if needed > 0 else []
         combined = local_results + open_library_results
-        # Убираем дубликаты
+        # Убираем дубликаты по id
         seen_ids = set()
         unique_results = []
         for book in combined:
             if book["id"] not in seen_ids:
                 seen_ids.add(book["id"])
                 unique_results.append(book)
+        # Перемешиваем, чтобы избежать повторения
+        random.shuffle(unique_results)
         return {
             "results": unique_results[:criteria.get("max_results", 10)],
             "is_fallback": False
@@ -397,6 +412,7 @@ async def chat_recommend(request: dict):
     open_library_results = await search_openlibrary(criteria, limit=criteria.get("max_results", 10))
     if open_library_results:
         print(f"📚 Найдено в OpenLibrary: {len(open_library_results)}")
+        random.shuffle(open_library_results)
         return {
             "results": open_library_results[:criteria.get("max_results", 10)],
             "is_fallback": True,
