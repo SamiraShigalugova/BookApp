@@ -266,7 +266,7 @@ class LoginRequest(BaseModel):
     password: str
 
 class UserResponse(BaseModel):
-    id: int
+    user_id: int  
     username: str
     email: str
     created_at: datetime
@@ -288,7 +288,7 @@ async def register(request: RegisterRequest):
     user_id = await data_collector.create_user(request.username, request.email, password_hash)
     user = await data_collector.get_user_by_id(user_id)
     return UserResponse(
-        id=user.id,
+        user_id=user.id, 
         username=user.username,
         email=user.email,
         created_at=user.created_at,
