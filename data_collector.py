@@ -1,15 +1,26 @@
-# data_collector.py
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import select, delete, func, and_
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey
 from sqlalchemy.sql import func as sql_func
-from datetime import datetime
+from datetime import datetime, timezone
 
 # --- Модели SQLAlchemy ---
 Base = declarative_base()
+
+
+class UserDB(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=sql_func.now())
+    last_login: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+
 
 class BookDB(Base):
     __tablename__ = "books"
@@ -35,6 +46,7 @@ class BookDB(Base):
             "description": self.description,
         }
 
+
 class InteractionDB(Base):
     __tablename__ = "interactions"
 
@@ -54,10 +66,10 @@ class InteractionDB(Base):
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
+
 # --- DataCollector ---
 class DataCollector:
     def __init__(self, database_url: str):
-        
         self.engine = create_async_engine(database_url, echo=False)
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False)
         self._stats_cache = {"total_interactions": 0, "unique_users": 0, "unique_books": 0}
@@ -80,6 +92,7 @@ class DataCollector:
                 "unique_books": books or 0
             }
 
+    # --- Методы для книг и взаимодействий ---
     async def add_books(self, books: List[Dict]):
         """Добавляет или обновляет книги."""
         async with self.async_session() as session:
@@ -210,3 +223,28 @@ class DataCollector:
             return True
         except Exception:
             return False
+
+    # --- Новые методы для работы с пользователями ---
+    async def create_user(self, username: str, email: str, password_hash: str) -> int:
+        async with self.async_session() as session:
+            user = UserDB(username=username, email=email, password_hash=password_hash)
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            return user.id
+
+    async def get_user_by_username(self, username: str) -> Optional[UserDB]:
+        async with self.async_session() as session:
+            result = await session.execute(select(UserDB).where(UserDB.username == username))
+            return result.scalar_one_or_none()
+
+    async def get_user_by_id(self, user_id: int) -> Optional[UserDB]:
+        async with self.async_session() as session:
+            return await session.get(UserDB, user_id)
+
+    async def update_last_login(self, user_id: int):
+        async with self.async_session() as session:
+            user = await session.get(UserDB, user_id)
+            if user:
+                user.last_login = datetime.now(timezone.utc)
+                await session.commit()
