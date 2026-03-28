@@ -523,6 +523,31 @@ async def clear_user_data(user_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/register")
+async def register(request: RegisterRequest):
+    # Проверка существования пользователя
+    existing = await data_collector.get_user_by_username(request.username)
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    # Здесь нужна функция хэширования пароля (например, bcrypt)
+    # Для простоты используем тот же метод, что и в AuthRepository (SHA-256 base64)
+    import hashlib, base64
+    password_hash = base64.b64encode(hashlib.sha256(request.password.encode()).digest()).decode()
+    user_id = await data_collector.create_user(request.username, request.email, password_hash)
+    return UserResponse(id=user_id, username=request.username, email=request.email, created_at=datetime.now())
+
+@app.post("/api/login")
+async def login(request: LoginRequest):
+    user = await data_collector.get_user_by_username(request.username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    # Проверка пароля (хэш)
+    password_hash = base64.b64encode(hashlib.sha256(request.password.encode()).digest()).decode()
+    if user.password_hash != password_hash:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    await data_collector.update_last_login(user.id)
+    return UserResponse(id=user.id, username=user.username, email=user.email, created_at=user.created_at)
+
 if __name__ == "__main__":
     print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы...")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
