@@ -248,3 +248,8 @@ class DataCollector:
             if user:
                 user.last_login = datetime.now(timezone.utc)
                 await session.commit()
+
+    async def get_user_by_email(self, email: str) -> Optional[UserDB]:
+        async with self.async_session() as session:
+            result = await session.execute(select(UserDB).where(UserDB.email == email))
+            return result.scalar_one_or_none()
