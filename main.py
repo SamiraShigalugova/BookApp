@@ -247,9 +247,18 @@ recommender = BookRecommender()
 async def startup_event():
     await data_collector.init_db()
     all_books = await data_collector.get_all_books()
-    if not all_books and LOCAL_BOOKS:
+    print(f"📚 В базе до загрузки: {len(all_books)} книг")
+    
+    # Загружаем локальные книги, если их ещё нет в базе
+    if LOCAL_BOOKS:
         await data_collector.add_books(LOCAL_BOOKS)
         print("✅ Локальные книги загружены в базу данных")
+        # Проверка после загрузки
+        all_books = await data_collector.get_all_books()
+        print(f"📚 После загрузки в базе {len(all_books)} книг")
+    else:
+        print("⚠️ Нет локальных книг для загрузки")
+    
     all_interactions = await data_collector.get_all_interactions()
     all_books = await data_collector.get_all_books()
     await asyncio.to_thread(recommender.build, all_interactions, all_books)
