@@ -205,6 +205,24 @@ async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
         raise Exception(f"GigaChat request failed: {response.status_code}")
     return response.json()
 
+_cached_token = None
+_token_expiry = 0
+
+async def get_cached_token():
+    global _cached_token, _token_expiry
+    import time
+    if _cached_token and time.time() < _token_expiry:
+        return _cached_token
+    client_id = os.getenv("GIGACHAT_CLIENT_ID")
+    client_secret = os.getenv("GIGACHAT_AUTH_KEY")   
+    if not client_id or not client_secret:
+        raise Exception("GIGACHAT_CLIENT_ID and GIGACHAT_AUTH_KEY are not set")
+    token = await get_gigachat_token(client_id, client_secret)
+    _cached_token = token
+    _token_expiry = time.time() + 28 * 60   # 28 минут
+    print("✅ GigaChat token получен и закэширован")
+    return token
+
 # ==================== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ====================
 app = FastAPI(
     title="Гибридная рекомендательная система книг",
@@ -352,38 +370,32 @@ async def chat_recommend(request: dict):
 Теперь обработай следующий запрос и выдай ТОЛЬКО JSON.
 """
 
-    auth_key = os.getenv("GIGACHAT_AUTH_KEY")
     criteria = {"genres": [], "authors": [], "keywords": [], "min_rating": 0, "max_results": 10}
 
-    if auth_key:
-        try:
-            token = await get_gigachat_token(auth_key, "")
-            response = await ask_gigachat(query, token, system_prompt)
-            print(f"🤖 GigaChat raw response: {response}")
+    try:
+        token = await get_cached_token()
+        response = await ask_gigachat(query, token, system_prompt)
+        print(f"🤖 GigaChat raw response: {response}")
 
-            if "choices" in response and response["choices"]:
-                content = response["choices"][0]["message"]["content"]
-                print(f"🤖 GigaChat content: {content}")
+        if "choices" in response and response["choices"]:
+            content = response["choices"][0]["message"]["content"]
+            print(f"🤖 GigaChat content: {content}")
 
-                # Ищем JSON в ответе
-                json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group())
-                        criteria.update(parsed)
-                        print(f"✅ Распознанные критерии: {criteria}")
-                    except Exception as e:
-                        print(f"❌ Ошибка парсинга JSON: {e}")
-                else:
-                    print("⚠️ GigaChat не вернул JSON")
+            json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group())
+                    criteria.update(parsed)
+                    print(f"✅ Распознанные критерии: {criteria}")
+                except Exception as e:
+                    print(f"❌ Ошибка парсинга JSON: {e}")
             else:
-                print("⚠️ GigaChat вернул пустой ответ")
-        except Exception as e:
-            print(f"❌ Ошибка GigaChat: {e}")
-    else:
-        print("⚠️ GIGACHAT_AUTH_KEY не задан, используем пустые критерии")
+                print("⚠️ GigaChat не вернул JSON")
+        else:
+            print("⚠️ GigaChat вернул пустой ответ")
+    except Exception as e:
+        print(f"❌ Ошибка GigaChat: {e}")
 
-    print(f"🔍 Финальные критерии поиска: {criteria}")
 
     # Поиск локальных книг
     local_results = search_local_books(criteria)
