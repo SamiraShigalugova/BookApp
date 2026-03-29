@@ -665,5 +665,6 @@ async def update_profile(user_id: int, request: ProfileUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    print("🚀 Запуск ГИБРИДНОЙ рекомендательной системы...")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    port = int(os.getenv("PORT", 10000))   # Render ожидает порт из переменной окружения
+    print(f"🚀 Запуск ГИБРИДНОЙ рекомендательной системы на порту {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
