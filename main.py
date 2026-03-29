@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr
 
 from data_models import *
-from data_collector import DataCollector
+from data_collector import DataCollector, UserDB
 from recommender import BookRecommender
 
 load_dotenv()
