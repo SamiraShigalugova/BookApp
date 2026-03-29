@@ -626,41 +626,57 @@ class ProfileUpdateRequest(BaseModel):
 
 @app.put("/api/user/{user_id}/profile")
 async def update_profile(user_id: int, request: ProfileUpdateRequest):
-    print(f"🔵 ПОЛУЧЕН ЗАПРОС на обновление user_id={user_id}")
-    print(f"   Данные: username={request.username}, email={request.email}")
     try:
+        print(f"🔵 ПОЛУЧЕН ЗАПРОС на обновление user_id={user_id}")
+        print(f"   Данные: username={request.username}, email={request.email}")
+        
         # Проверяем, существует ли пользователь
         user = await data_collector.get_user_by_id(user_id)
         if not user:
+            print(f"❌ Пользователь {user_id} не найден")
             raise HTTPException(status_code=404, detail="User not found")
         
         # Проверяем, не занято ли новое имя другим пользователем
         existing_user = await data_collector.get_user_by_username(request.username)
         if existing_user and existing_user.id != user_id:
+            print(f"❌ Имя {request.username} уже занято")
             raise HTTPException(status_code=400, detail="Username already taken")
         
         # Проверяем, не занят ли email другим пользователем
-        existing_email = await data_collector.get_user_by_email(request.email)
-        if existing_email and existing_email.id != user_id:
-            raise HTTPException(status_code=400, detail="Email already registered")
+        if request.email:
+            existing_email = await data_collector.get_user_by_email(request.email)
+            if existing_email and existing_email.id != user_id:
+                print(f"❌ Email {request.email} уже занят")
+                raise HTTPException(status_code=400, detail="Email already registered")
         
         # Обновляем пользователя
-        async with data_collector.async_session() as session:
-            user.username = request.username
-            user.email = request.email
-            await session.commit()
-            await session.refresh(user)
+        print(f"🟢 Обновляем пользователя {user_id}: {user.username} -> {request.username}, {user.email} -> {request.email}")
         
-        return {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "created_at": user.created_at,
-            "last_login": user.last_login
-        }
+        async with data_collector.async_session() as session:
+            # Получаем свежий объект из сессии
+            db_user = await session.get(UserDB, user_id)
+            if db_user:
+                db_user.username = request.username
+                db_user.email = request.email
+                await session.commit()
+                await session.refresh(db_user)
+                print(f"✅ После обновления: {db_user.username}, {db_user.email}")
+                return {
+                    "id": db_user.id,
+                    "username": db_user.username,
+                    "email": db_user.email,
+                    "created_at": db_user.created_at,
+                    "last_login": db_user.last_login
+                }
+            else:
+                raise HTTPException(status_code=404, detail="User not found in session")
+                
     except HTTPException:
         raise
     except Exception as e:
+        print(f"❌ Критическая ошибка: {type(e).__name__}: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
