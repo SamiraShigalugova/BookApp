@@ -626,9 +626,8 @@ class ProfileUpdateRequest(BaseModel):
 
 @app.put("/api/user/{user_id}/profile")
 async def update_profile(user_id: int, request: ProfileUpdateRequest):
-    """
-    Обновляет имя пользователя и email.
-    """
+    print(f"🔵 ПОЛУЧЕН ЗАПРОС на обновление user_id={user_id}")
+    print(f"   Данные: username={request.username}, email={request.email}")
     try:
         # Проверяем, существует ли пользователь
         user = await data_collector.get_user_by_id(user_id)
