@@ -162,15 +162,18 @@ def openlibrary_to_google_book(doc: dict) -> dict:
 _cached_token = None
 _token_expiry = 0
 
-async def get_gigachat_token(client_id: str, client_secret: str):
-    credentials = f"{client_id}:{client_secret}"
-    auth_header = base64.b64encode(credentials.encode()).decode()
+async def get_gigachat_token(auth_key: str):
+    # auth_key уже содержит Base64(client_id:client_secret)
     headers = {
-        "Authorization": f"Basic {auth_header}",
+        "Authorization": f"Basic {auth_key.strip()}",
         "RqUID": str(uuid.uuid4()),
-        "Content-Type": "application/x-www-form-urlencoded"
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json"
     }
-    data = {"scope": "GIGACHAT_API_PERS"}
+    data = {
+        "grant_type": "client_credentials",
+        "scope": "GIGACHAT_API_PERS"
+    }
     async with httpx.AsyncClient(verify=False) as client:
         response = await client.post(
             "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
@@ -215,11 +218,10 @@ async def get_cached_token():
     import time
     if _cached_token and time.time() < _token_expiry:
         return _cached_token
-    client_id = os.getenv("GIGACHAT_CLIENT_ID")
-    client_secret = os.getenv("GIGACHAT_AUTH_KEY")
-    if not client_id or not client_secret:
-        raise Exception("GIGACHAT_CLIENT_ID and GIGACHAT_AUTH_KEY are not set")
-    token = await get_gigachat_token(client_id, client_secret)
+    auth_key = os.getenv("GIGACHAT_AUTH_KEY")
+    if not auth_key:
+        raise Exception("GIGACHAT_AUTH_KEY is not set")
+    token = await get_gigachat_token(auth_key)
     _cached_token = token
     _token_expiry = time.time() + 28 * 60
     print("✅ GigaChat token получен и закэширован")
