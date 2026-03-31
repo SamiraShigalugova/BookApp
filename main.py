@@ -460,110 +460,155 @@ async def chat_recommend(request: dict):
 
     print(f"📝 Запрос чата: {query}")
 
+    # ================= PROMPT =================
     system_prompt = """
-Ты – интеллектуальный помощник по поиску книг. Твоя задача – извлечь из запроса пользователя структурированные критерии поиска и вернуть их в виде JSON. Не добавляй пояснений, только JSON.
+Ты — эксперт по книгам и литературный рекомендатель.
 
-Вот возможные поля:
-- "genres": список жанров (например, ["фэнтези", "детектив"]). Жанры могут быть на русском или английском. Переводи их в русский.
-- "authors": список авторов (имена на русском или английском, переводи на русский).
-- "keywords": список ключевых слов из запроса (например, ["любовь", "приключения"]).
-- "min_rating": минимальный рейтинг (число от 0 до 5). Если не указан, ставь 0.
-- "max_results": максимальное количество книг (число). По умолчанию 10.
+Твоя задача — рекомендовать КОНКРЕТНЫЕ книги, а не извлекать ключевые слова.
 
-Если запрос содержит фразы вроде "похожие на [книга/автор]" – попробуй извлечь жанры/автора той книги (если знаешь). Если не уверен, оставь пустым.
+Правила:
+- Учитывай смысл запроса (настроение, сложность, стиль)
+- "лёгкое на вечер" → лёгкое, увлекательное
+- "что-то глубокое" → философия, классика
+- "как Гарри Поттер" → похожие книги
 
-Примеры запросов и ожидаемых JSON:
+Верни строго JSON:
 
-Запрос: "Хочу почитать фэнтези про драконов"
-Ответ: {"genres": ["фэнтези"], "keywords": ["драконы"], "min_rating": 0, "max_results": 10}
+{
+  "recommendations": [
+    {
+      "title": "Название книги",
+      "author": "Автор",
+      "reason": "почему подходит"
+    }
+  ]
+}
 
-Запрос: "Порекомендуй детективы Агаты Кристи"
-Ответ: {"genres": ["детектив"], "authors": ["Агата Кристи"], "keywords": [], "min_rating": 0, "max_results": 10}
-
-Запрос: "Что-то страшное с высоким рейтингом"
-Ответ: {"genres": ["ужасы", "триллер"], "keywords": [], "min_rating": 4.0, "max_results": 10}
-
-Запрос: "Книги про космос и будущее"
-Ответ: {"genres": ["научная фантастика"], "keywords": ["космос", "будущее"], "min_rating": 0, "max_results": 10}
-
-Запрос: "Интересные книги"
-Ответ: {"genres": [], "authors": [], "keywords": ["интересные"], "min_rating": 0, "max_results": 10}
-
-Теперь обработай следующий запрос и выдай ТОЛЬКО JSON.
+Без текста вне JSON.
 """
 
-    criteria = {"genres": [], "authors": [], "keywords": [], "min_rating": 0, "max_results": 10}
+    # ================= MATCH FUNCTION =================
+    def match_with_local_books(llm_books, local_books):
+        results = []
+
+        for rec in llm_books:
+            title = rec.get("title", "").lower()
+            author = rec.get("author", "").lower()
+
+            best_match = None
+            best_score = 0
+
+            for book in local_books:
+                t = book.get("title", "").lower()
+                a = book.get("author", "").lower()
+
+                score = 0
+
+                if title in t or t in title:
+                    score += 2
+                if author and (author in a or a in author):
+                    score += 2
+
+                # небольшой бонус за частичное совпадение слов
+                if any(word in t for word in title.split()):
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_match = book
+
+            if best_match:
+                results.append(book_to_google_book(best_match))
+
+        return results
+
+    # ================= STEP 1: LLM =================
+    llm_books = []
 
     try:
         token = await get_cached_token()
         response = await ask_gigachat(query, token, system_prompt)
-        print(f"🤖 GigaChat raw response: {response}")
+
+        print(f"🤖 GigaChat raw: {response}")
 
         if "choices" in response and response["choices"]:
             content = response["choices"][0]["message"]["content"]
-            print(f"🤖 GigaChat content: {content}")
 
-            json_match = re.search(r'\{[^{}]*\}', content, re.DOTALL)
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
-                try:
-                    parsed = json.loads(json_match.group())
-                    criteria.update(parsed)
-                    print(f"✅ Распознанные критерии: {criteria}")
-                except Exception as e:
-                    print(f"❌ Ошибка парсинга JSON: {e}")
+                parsed = json.loads(json_match.group())
+                llm_books = parsed.get("recommendations", [])
+                print(f"✅ LLM рекомендации: {llm_books}")
             else:
-                print("⚠️ GigaChat не вернул JSON")
-        else:
-            print("⚠️ GigaChat вернул пустой ответ")
+                print("⚠️ JSON не найден в ответе LLM")
+
     except Exception as e:
-        print(f"❌ Ошибка GigaChat: {e}")
+        print(f"❌ Ошибка LLM: {e}")
 
-    # Поиск локальных книг
-    local_results = search_local_books(criteria)
-    print(f"📚 Найдено локальных книг: {len(local_results)}")
+    # ================= STEP 2: MATCH LOCAL =================
+    local_results = match_with_local_books(llm_books, LOCAL_BOOKS)
 
-    if local_results:
-        needed = max(0, criteria.get("max_results", 10) - len(local_results))
-        open_library_results = await search_openlibrary(criteria, limit=needed) if needed > 0 else []
-        combined = local_results + open_library_results
-        seen_ids = set()
-        unique_results = []
-        for book in combined:
-            if book["id"] not in seen_ids:
-                seen_ids.add(book["id"])
-                unique_results.append(book)
-        random.shuffle(unique_results)
+    print(f"📚 Смэтчено локальных: {len(local_results)}")
+
+    # ================= STEP 3: ЕСЛИ НАШЛИ ДОСТАТОЧНО =================
+    if len(local_results) >= 5:
         return {
-            "results": unique_results[:criteria.get("max_results", 10)],
+            "results": local_results[:10],
+            "source": "local+llm",
             "is_fallback": False
         }
 
-    open_library_results = await search_openlibrary(criteria, limit=criteria.get("max_results", 10))
-    if open_library_results:
-        print(f"📚 Найдено в OpenLibrary: {len(open_library_results)}")
-        random.shuffle(open_library_results)
-        return {
-            "results": open_library_results[:criteria.get("max_results", 10)],
-            "is_fallback": True,
-            "fallback_message": f"К сожалению, я не смог найти книги по запросу «{query}». Возможно, вам подойдут эти книги:"
-        }
+    # ================= STEP 4: ДОБИВАЕМ OPENLIBRARY =================
+    try:
+        needed = 10 - len(local_results)
+        openlib = await search_openlibrary({"keywords": [query]}, limit=needed)
+
+        combined = local_results + openlib
+
+        # убираем дубликаты
+        seen = set()
+        unique = []
+
+        for b in combined:
+            if b["id"] not in seen:
+                seen.add(b["id"])
+                unique.append(b)
+
+        if unique:
+            return {
+                "results": unique[:10],
+                "source": "llm+openlibrary",
+                "is_fallback": False
+            }
+
+    except Exception as e:
+        print(f"❌ OpenLibrary ошибка: {e}")
+
+    # ================= STEP 5: ПОСЛЕДНИЙ FALLBACK =================
+    print("⚠️ Используем популярные книги")
 
     all_books = await data_collector.get_all_books()
+
     if all_books:
-        top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:50]
+        top_books = sorted(
+            all_books,
+            key=lambda x: x.get("average_rating", 0),
+            reverse=True
+        )[:50]
+
         random.shuffle(top_books)
-        popular_books = [book_to_google_book(book) for book in top_books[:10]]
-        print(f"📚 Fallback: показываем {len(popular_books)} популярных книг")
+
         return {
-            "results": popular_books,
+            "results": [book_to_google_book(b) for b in top_books[:10]],
+            "source": "popular_fallback",
             "is_fallback": True,
-            "fallback_message": f"По запросу «{query}» ничего не найдено. Попробуйте другие ключевые слова. Вот популярные книги:"
+            "fallback_message": f"По запросу «{query}» точных рекомендаций не найдено. Вот популярные книги:"
         }
 
     return {
         "results": [],
         "is_fallback": True,
-        "fallback_message": "Извините, ничего не найдено. Попробуйте изменить запрос."
+        "fallback_message": "Ничего не найдено"
     }
 
 @app.get("/api/user/{user_id}/stats")
