@@ -460,30 +460,31 @@ async def chat_recommend(request: dict):
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
 
-    print(f"📝 Запрос чата: {query}")
+    print(f"📝 Запрос чата: {query}, user_id={user_id}")
 
     # ================= PROMPT =================
-    system_prompt = f"""
+    system_prompt = """
 Ты — эксперт по книгам.
 
 Сделай:
-1. Предложи конкретные книги
-2. Извлеки смысл запроса (жанры, настроение, темы)
+1. Предложи конкретные книги (название и автор)
+2. Извлеки смысл запроса: жанры (на английском), авторы, ключевые слова
 
-Верни JSON:
+Верни ТОЛЬКО JSON:
 
-{{
+{
   "specific_books": [
-    {{"title": "...", "author": "..."}}
+    {"title": "Название", "author": "Автор"}
   ],
-  "criteria": {{
-    "genres": [],
-    "authors": [],
-    "keywords": []
-  }}
-}}
+  "criteria": {
+    "genres": ["жанр1", "жанр2"],
+    "authors": ["автор1"],
+    "keywords": ["слово1", "слово2"]
+  }
+}
 
-Запрос: {query}
+Если не знаешь конкретных книг, оставь specific_books пустым.
+Если не можешь определить критерии, оставь пустые списки.
 """
 
     # ================= HELPERS =================
@@ -515,7 +516,12 @@ async def chat_recommend(request: dict):
                 best_score = score
                 best_match = book
 
-        return best_match if best_score > 0.2 else None
+        if best_score > 0.2:
+            print(f"   Сопоставлено: {best_match['title']} (score={best_score})")
+            return best_match
+        else:
+            print(f"   Не сопоставлено: {title} / {author} (max score={best_score})")
+            return None
 
     # ================= STEP 1: LLM =================
     llm_specific = []
@@ -527,20 +533,29 @@ async def chat_recommend(request: dict):
 
         if "choices" in response and response["choices"]:
             content = response["choices"][0]["message"]["content"]
+            print(f"🤖 GigaChat content: {content}")
 
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
                 parsed = json.loads(json_match.group())
                 llm_specific = parsed.get("specific_books", [])
                 criteria.update(parsed.get("criteria", {}))
-
-        print(f"✅ LLM книги: {llm_specific}")
-        print(f"✅ criteria: {criteria}")
+                print(f"✅ LLM книги: {llm_specific}")
+                print(f"✅ criteria: {criteria}")
+            else:
+                print("⚠️ JSON не найден в ответе GigaChat")
+        else:
+            print("⚠️ GigaChat вернул пустой ответ")
 
     except Exception as e:
-        print(f"❌ LLM ошибка: {e}")
+        print(f"❌ Ошибка GigaChat: {e}")
+        # В случае ошибки LLM, пытаемся извлечь простые ключевые слова из запроса
+        # Это даст хоть какой-то поиск
+        keywords = query.lower().split()
+        criteria["keywords"] = [w for w in keywords if len(w) > 3]
+        print(f"   Используем fallback-ключевые слова: {criteria['keywords']}")
 
-    # ================= STEP 2: MATCH =================
+    # ================= STEP 2: MATCH конкретных книг =================
     local_results = []
 
     for rec in llm_specific:
@@ -551,8 +566,14 @@ async def chat_recommend(request: dict):
     print(f"📚 match: {len(local_results)}")
 
     # ================= STEP 3: CRITERIA FALLBACK =================
+    # Если критерии пусты, но есть query, используем query как ключевые слова
+    if not criteria["genres"] and not criteria["authors"] and not criteria["keywords"]:
+        criteria["keywords"] = query.lower().split()[:5]  # первые 5 слов
+        print(f"   Критерии пусты, используем ключевые слова из запроса: {criteria['keywords']}")
+
     if len(local_results) < 5:
         extra = search_local_books(criteria)
+        print(f"   Найдено по критериям: {len(extra)}")
 
         seen = {b["id"] for b in local_results}
         for b in extra:
@@ -566,6 +587,7 @@ async def chat_recommend(request: dict):
     if len(local_results) < 5:
         try:
             openlib = await search_openlibrary(criteria, limit=10 - len(local_results))
+            print(f"   Добавлено из OpenLibrary: {len(openlib)}")
 
             seen = {b["id"] for b in local_results}
             for b in openlib:
@@ -574,63 +596,56 @@ async def chat_recommend(request: dict):
                     seen.add(b["id"])
 
         except Exception as e:
-            print(f"❌ OpenLibrary: {e}")
+            print(f"❌ OpenLibrary ошибка: {e}")
 
     print(f"📚 после openlib: {len(local_results)}")
 
-    # ================= STEP 5: FALLBACK =================
+    # ================= STEP 5: FALLBACK (если всё равно пусто) =================
     if not local_results:
+        print("⚠️ Нет результатов, используем популярные книги")
         all_books = await data_collector.get_all_books()
-
         if all_books:
-            top_books = sorted(
-                all_books,
-                key=lambda x: x.get("average_rating", 0),
-                reverse=True
-            )[:50]
-
+            top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:50]
             random.shuffle(top_books)
-
+            popular = [book_to_google_book(b) for b in top_books[:10]]
             return {
-                "results": [book_to_google_book(b) for b in top_books[:10]],
+                "results": popular,
                 "source": "popular",
                 "is_fallback": True
             }
+        else:
+            return {"results": [], "is_fallback": True}
 
-        return {"results": [], "is_fallback": True}
+    # ================= STEP 6: ПЕРСОНАЛЬНОЕ РАНЖИРОВАНИЕ (если есть user_id и взаимодействия) =================
+    if user_id > 0:
+        try:
+            all_books_map = {b["id"]: b for b in await data_collector.get_all_books()}
+            candidate_books = []
+            for b in local_results:
+                book_id = b["id"]
+                if book_id in all_books_map:
+                    candidate_books.append(all_books_map[book_id])
 
-    # ================= STEP 6: RERANK (🔥 ГЛАВНОЕ) =================
-    try:
-        all_books_map = {b["id"]: b for b in await data_collector.get_all_books()}
+            user_interactions = await data_collector.get_user_interactions(user_id)
 
-        candidate_books = []
-        for b in local_results:
-            book_id = b["id"]
-            if book_id in all_books_map:
-                candidate_books.append(all_books_map[book_id])
-
-        user_interactions = await data_collector.get_user_interactions(user_id)
-
-        if candidate_books and user_interactions:
-            reranked, scores = recommender.recommend(
-                user_id=user_id,
-                candidate_books=candidate_books,
-                user_interactions=user_interactions,
-                top_k=10
-            )
-
-            print("✅ reranked")
-
-            return {
-                "results": [book_to_google_book(b) for b in reranked],
-                "source": "llm+recommender",
-                "is_fallback": False
-            }
-
-    except Exception as e:
-        print(f"❌ rerank ошибка: {e}")
+            if candidate_books and user_interactions:
+                reranked, scores = recommender.recommend(
+                    user_id=user_id,
+                    candidate_books=candidate_books,
+                    user_interactions=user_interactions,
+                    top_k=10
+                )
+                print(f"✅ Ранжировано {len(reranked)} книг")
+                return {
+                    "results": [book_to_google_book(b) for b in reranked],
+                    "source": "llm+recommender",
+                    "is_fallback": False
+                }
+        except Exception as e:
+            print(f"❌ Ошибка ранжирования: {e}")
 
     # ================= FINAL =================
+    print(f"📤 Возвращаем {len(local_results[:10])} книг (без ранжирования)")
     return {
         "results": local_results[:10],
         "source": "llm+fallback",
