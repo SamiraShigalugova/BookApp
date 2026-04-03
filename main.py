@@ -7,7 +7,7 @@ import uuid
 import random
 import httpx
 import hashlib
-from typing import Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +28,35 @@ if not DATABASE_URL:
 if "postgresql" in DATABASE_URL and "+asyncpg" not in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
     print(f"✅ Преобразованный DATABASE_URL для asyncpg: {DATABASE_URL}")
+
+# ==================== МАППИНГ ЖАНРОВ ====================
+GENRE_MAP = {
+    "romance": ["романтика", "любовный роман"],
+    "fantasy": ["фэнтези"],
+    "science fiction": ["научная фантастика", "фантастика"],
+    "mystery": ["детектив", "мистика"],
+    "thriller": ["триллер"],
+    "horror": ["ужасы"],
+    "adventure": ["приключения"],
+    "classics": ["классика"],
+    "poetry": ["поэзия"],
+    "biography": ["биография"],
+    "history": ["история"],
+    "philosophy": ["философия"],
+    "self development": ["саморазвитие", "психология"],
+    "business": ["бизнес"],
+    "finance": ["финансы"],
+}
+
+def expand_genres(genres: List[str]) -> List[str]:
+    """Расширяет список жанров, добавляя русские эквиваленты."""
+    expanded = []
+    for g in genres:
+        g_lower = g.lower()
+        expanded.append(g_lower)
+        if g_lower in GENRE_MAP:
+            expanded.extend(GENRE_MAP[g_lower])
+    return list(set(expanded))
 
 # ==================== ЗАГРУЗКА ЛОКАЛЬНЫХ КНИГ ====================
 def generate_global_id(title: str, author: str) -> str:
@@ -53,13 +82,26 @@ except Exception as e:
 
 # ==================== ФУНКЦИИ ПОИСКА ====================
 def search_local_books(criteria: dict) -> list:
-    genres = [g.lower() for g in criteria.get("genres", [])]
+    """
+    Поиск по локальным книгам.
+    criteria может содержать:
+      - specific_books: list[{"title":..., "author":...}]
+      - genres: list[str] (на английском, будут расширены)
+      - authors: list[str]
+      - keywords: list[str]
+      - min_rating: float
+      - max_results: int
+    """
+    specific_books = criteria.get("specific_books", [])
+    genres = criteria.get("genres", [])
+    expanded_genres = expand_genres(genres) if genres else []
     keywords = [k.lower() for k in criteria.get("keywords", [])]
     authors = [a.lower() for a in criteria.get("authors", [])]
     min_rating = criteria.get("min_rating", 0)
-    max_results = criteria.get("max_results", 10)
+    max_results = criteria.get("max_results", 20)
 
-    if not genres and not keywords and not authors:
+    # Если нет никаких критериев – случайные книги
+    if not expanded_genres and not keywords and not authors and not specific_books:
         all_books = list(LOCAL_BOOKS)
         random.shuffle(all_books)
         return [book_to_google_book(book) for book in all_books[:max_results]]
@@ -68,16 +110,43 @@ def search_local_books(criteria: dict) -> list:
     for book in LOCAL_BOOKS:
         score = 0
         book_genre = book.get("genre", "").lower()
-        if genres and any(g in book_genre for g in genres):
-            score += 3
-        if authors and any(a in book.get("author", "").lower() for a in authors):
-            score += 3
-        text = (book.get("title", "") + " " + book.get("description", "")).lower()
-        for kw in keywords:
-            if kw in text:
-                score += 1
-        if book.get("average_rating", 0) >= min_rating:
-            score += 0.5
+        book_title = book.get("title", "").lower()
+        book_author = book.get("author", "").lower()
+        book_desc = book.get("description", "").lower()
+        avg_rating = book.get("average_rating", 0)
+
+        # 1. Похожесть на конкретные книги (самый высокий вес)
+        for spec in specific_books:
+            spec_title = spec.get("title", "").lower()
+            spec_author = spec.get("author", "").lower()
+            if spec_title and spec_author:
+                if spec_title in book_title or spec_author in book_author:
+                    score += 10
+            elif spec_title and spec_title in book_title:
+                score += 8
+
+        # 2. Жанры (с расширением)
+        if expanded_genres:
+            if any(g == book_genre for g in expanded_genres):
+                score += 10
+            elif any(g in book_genre for g in expanded_genres):
+                score += 5
+
+        # 3. Авторы
+        if authors and any(a in book_author for a in authors):
+            score += 5
+
+        # 4. Ключевые слова (в заголовке, описании, жанре)
+        if keywords:
+            text = f"{book_title} {book_desc} {book_genre}"
+            for kw in keywords:
+                if kw in text:
+                    score += 2
+
+        # 5. Бонус за рейтинг
+        if avg_rating >= min_rating:
+            score += min(avg_rating / 2, 2)
+
         if score > 0:
             results.append((book, score))
 
@@ -163,7 +232,6 @@ _cached_token = None
 _token_expiry = 0
 
 async def get_gigachat_token(auth_key: str):
-    # auth_key уже содержит Base64(client_id:client_secret)
     headers = {
         "Authorization": f"Basic {auth_key.strip()}",
         "RqUID": str(uuid.uuid4()),
@@ -193,7 +261,26 @@ async def ask_gigachat(prompt: str, token: str, system_prompt: str = None):
         "Content-Type": "application/json"
     }
     if system_prompt is None:
-        system_prompt = "Ты – помощник, который преобразует запрос пользователя о книгах в структурированный JSON для поиска."
+        system_prompt = (
+            "Ты – эксперт по книгам.\n"
+            "Проанализируй запрос пользователя и верни ТОЛЬКО JSON в формате:\n"
+            "{\n"
+            "  \"specific_books\": [\n"
+            "    {\"title\": \"Название конкретной книги\", \"author\": \"Автор\"}\n"
+            "  ],\n"
+            "  \"criteria\": {\n"
+            "    \"genres\": [\"жанр1\", \"жанр2\"],\n"
+            "    \"authors\": [\"автор1\"],\n"
+            "    \"keywords\": [\"ключевое слово1\", \"ключевое слово2\"],\n"
+            "    \"min_rating\": 0\n"
+            "  }\n"
+            "}\n"
+            "Жанры указывай на английском: romance, fantasy, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance.\n"
+            "Если пользователь спрашивает про похожесть на книгу, укажи её в specific_books.\n"
+            "Если просит 'лёгкое на вечер', добавь keywords: ['легкое', 'вечер'].\n"
+            "Если просит 'популярное' или 'лучшее', установи min_rating: 4.0.\n"
+            "Не добавляй пояснений, только JSON."
+        )
     payload = {
         "model": "GigaChat",
         "messages": [
@@ -251,11 +338,9 @@ async def startup_event():
     all_books = await data_collector.get_all_books()
     print(f"📚 В базе до загрузки: {len(all_books)} книг")
     
-    # Загружаем локальные книги, если их ещё нет в базе
     if LOCAL_BOOKS:
         await data_collector.add_books(LOCAL_BOOKS)
         print("✅ Локальные книги загружены в базу данных")
-        # Проверка после загрузки
         all_books = await data_collector.get_all_books()
         print(f"📚 После загрузки в базе {len(all_books)} книг")
     else:
@@ -455,81 +540,20 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
     query = request.get("query", "")
-    user_id = request.get("user_id", 0)
+    user_id = request.get("user_id", 0)   # user_id пока не используется, но оставим
 
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
 
     print(f"📝 Запрос чата: {query}, user_id={user_id}")
 
-    # ================= PROMPT =================
-    system_prompt = """
-Ты — эксперт по книгам.
-
-Сделай:
-1. Предложи конкретные книги (название и автор)
-2. Извлеки смысл запроса: жанры (на английском), авторы, ключевые слова
-
-Верни ТОЛЬКО JSON:
-
-{
-  "specific_books": [
-    {"title": "Название", "author": "Автор"}
-  ],
-  "criteria": {
-    "genres": ["жанр1", "жанр2"],
-    "authors": ["автор1"],
-    "keywords": ["слово1", "слово2"]
-  }
-}
-
-Если не знаешь конкретных книг, оставь specific_books пустым.
-Если не можешь определить критерии, оставь пустые списки.
-"""
-
-    # ================= HELPERS =================
-    def simple_similarity(a, b):
-        a_words = set(a.split())
-        b_words = set(b.split())
-        if not a_words or not b_words:
-            return 0
-        return len(a_words & b_words) / len(a_words | b_words)
-
-    def match_specific_book(rec, local_books):
-        title = rec.get("title", "").lower()
-        author = rec.get("author", "").lower()
-
-        best_match = None
-        best_score = 0
-
-        for book in local_books:
-            t = book.get("title", "").lower()
-            a = book.get("author", "").lower()
-
-            score = 0
-            score += simple_similarity(title, t) * 3
-
-            if author:
-                score += simple_similarity(author, a) * 2
-
-            if score > best_score:
-                best_score = score
-                best_match = book
-
-        if best_score > 0.2:
-            print(f"   Сопоставлено: {best_match['title']} (score={best_score})")
-            return best_match
-        else:
-            print(f"   Не сопоставлено: {title} / {author} (max score={best_score})")
-            return None
-
-    # ================= STEP 1: LLM =================
+    # ================= ШАГ 1: GigaChat =================
     llm_specific = []
-    criteria = {"genres": [], "authors": [], "keywords": []}
+    criteria = {"genres": [], "authors": [], "keywords": [], "min_rating": 0}
 
     try:
         token = await get_cached_token()
-        response = await ask_gigachat(query, token, system_prompt)
+        response = await ask_gigachat(query, token)   # system_prompt уже внутри
 
         if "choices" in response and response["choices"]:
             content = response["choices"][0]["message"]["content"]
@@ -546,18 +570,35 @@ async def chat_recommend(request: dict):
                 print("⚠️ JSON не найден в ответе GigaChat")
         else:
             print("⚠️ GigaChat вернул пустой ответ")
-
     except Exception as e:
         print(f"❌ Ошибка GigaChat: {e}")
-        # В случае ошибки LLM, пытаемся извлечь простые ключевые слова из запроса
-        # Это даст хоть какой-то поиск
+        # Fallback – пытаемся извлечь ключевые слова из запроса
         keywords = query.lower().split()
         criteria["keywords"] = [w for w in keywords if len(w) > 3]
         print(f"   Используем fallback-ключевые слова: {criteria['keywords']}")
 
-    # ================= STEP 2: MATCH конкретных книг =================
-    local_results = []
+    # ================= ШАГ 2: Поиск по конкретным книгам =================
+    def match_specific_book(rec, local_books):
+        title = rec.get("title", "").lower()
+        author = rec.get("author", "").lower()
+        best_match = None
+        best_score = 0
+        for book in local_books:
+            t = book.get("title", "").lower()
+            a = book.get("author", "").lower()
+            score = 0
+            if title and title in t:
+                score += 10
+            if author and author in a:
+                score += 5
+            if score > best_score:
+                best_score = score
+                best_match = book
+        if best_score > 0:
+            return best_match
+        return None
 
+    local_results = []
     for rec in llm_specific:
         matched = match_specific_book(rec, LOCAL_BOOKS)
         if matched:
@@ -565,16 +606,14 @@ async def chat_recommend(request: dict):
 
     print(f"📚 match: {len(local_results)}")
 
-    # ================= STEP 3: CRITERIA FALLBACK =================
-    # Если критерии пусты, но есть query, используем query как ключевые слова
-    if not criteria["genres"] and not criteria["authors"] and not criteria["keywords"]:
-        criteria["keywords"] = query.lower().split()[:5]  # первые 5 слов
-        print(f"   Критерии пусты, используем ключевые слова из запроса: {criteria['keywords']}")
+    # ================= ШАГ 3: Поиск по критериям =================
+    # Добавляем specific_books в критерии для более широкого поиска
+    if llm_specific:
+        criteria["specific_books"] = llm_specific
 
-    if len(local_results) < 5:
+    if len(local_results) < 10:
         extra = search_local_books(criteria)
         print(f"   Найдено по критериям: {len(extra)}")
-
         seen = {b["id"] for b in local_results}
         for b in extra:
             if b["id"] not in seen:
@@ -583,24 +622,22 @@ async def chat_recommend(request: dict):
 
     print(f"📚 после criteria: {len(local_results)}")
 
-    # ================= STEP 4: OPENLIBRARY =================
+    # ================= ШАГ 4: OpenLibrary, если всё ещё мало =================
     if len(local_results) < 5:
         try:
-            openlib = await search_openlibrary(criteria, limit=10 - len(local_results))
+            openlib = await search_openlibrary(criteria, limit=15 - len(local_results))
             print(f"   Добавлено из OpenLibrary: {len(openlib)}")
-
             seen = {b["id"] for b in local_results}
             for b in openlib:
                 if b["id"] not in seen:
                     local_results.append(b)
                     seen.add(b["id"])
-
         except Exception as e:
             print(f"❌ OpenLibrary ошибка: {e}")
 
     print(f"📚 после openlib: {len(local_results)}")
 
-    # ================= STEP 5: FALLBACK (если всё равно пусто) =================
+    # ================= ШАГ 5: Fallback (популярные) =================
     if not local_results:
         print("⚠️ Нет результатов, используем популярные книги")
         all_books = await data_collector.get_all_books()
@@ -616,39 +653,15 @@ async def chat_recommend(request: dict):
         else:
             return {"results": [], "is_fallback": True}
 
-    # ================= STEP 6: ПЕРСОНАЛЬНОЕ РАНЖИРОВАНИЕ (если есть user_id и взаимодействия) =================
-    if user_id > 0:
-        try:
-            all_books_map = {b["id"]: b for b in await data_collector.get_all_books()}
-            candidate_books = []
-            for b in local_results:
-                book_id = b["id"]
-                if book_id in all_books_map:
-                    candidate_books.append(all_books_map[book_id])
-
-            user_interactions = await data_collector.get_user_interactions(user_id)
-
-            if candidate_books and user_interactions:
-                reranked, scores = recommender.recommend(
-                    user_id=user_id,
-                    candidate_books=candidate_books,
-                    user_interactions=user_interactions,
-                    top_k=10
-                )
-                print(f"✅ Ранжировано {len(reranked)} книг")
-                return {
-                    "results": [book_to_google_book(b) for b in reranked],
-                    "source": "llm+recommender",
-                    "is_fallback": False
-                }
-        except Exception as e:
-            print(f"❌ Ошибка ранжирования: {e}")
-
-    # ================= FINAL =================
-    print(f"📤 Возвращаем {len(local_results[:10])} книг (без ранжирования)")
+    # ================= ФИНАЛ: возвращаем до 10 книг (БЕЗ ПЕРСОНАЛИЗАЦИИ) =================
+    # Убедимся, что книги отсортированы по релевантности (search_local_books уже отсортировал,
+    # но после добавления OpenLibrary порядок мог нарушиться – отсортируем заново по среднему рейтингу)
+    # Чтобы не потерять релевантность, можно оставить как есть. Но для чистоты отсортируем по убыванию рейтинга.
+    final_results = sorted(local_results[:10], key=lambda b: b["volumeInfo"].get("averageRating", 0), reverse=True)
+    print(f"📤 Возвращаем {len(final_results)} книг")
     return {
-        "results": local_results[:10],
-        "source": "llm+fallback",
+        "results": final_results,
+        "source": "llm+search",
         "is_fallback": False
     }
 
@@ -705,7 +718,6 @@ async def clear_user_data(user_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Добавить модель для обновления профиля
 class ProfileUpdateRequest(BaseModel):
     username: str
     email: str
@@ -714,39 +726,23 @@ class ProfileUpdateRequest(BaseModel):
 async def update_profile(user_id: int, request: ProfileUpdateRequest):
     try:
         print(f"🔵 ПОЛУЧЕН ЗАПРОС на обновление user_id={user_id}")
-        print(f"   Данные: username={request.username}, email={request.email}")
-        
-        # Проверяем, существует ли пользователь
         user = await data_collector.get_user_by_id(user_id)
         if not user:
-            print(f"❌ Пользователь {user_id} не найден")
             raise HTTPException(status_code=404, detail="User not found")
-        
-        # Проверяем, не занято ли новое имя другим пользователем
         existing_user = await data_collector.get_user_by_username(request.username)
         if existing_user and existing_user.id != user_id:
-            print(f"❌ Имя {request.username} уже занято")
             raise HTTPException(status_code=400, detail="Username already taken")
-        
-        # Проверяем, не занят ли email другим пользователем
         if request.email:
             existing_email = await data_collector.get_user_by_email(request.email)
             if existing_email and existing_email.id != user_id:
-                print(f"❌ Email {request.email} уже занят")
                 raise HTTPException(status_code=400, detail="Email already registered")
-        
-        # Обновляем пользователя
-        print(f"🟢 Обновляем пользователя {user_id}: {user.username} -> {request.username}, {user.email} -> {request.email}")
-        
         async with data_collector.async_session() as session:
-            # Получаем свежий объект из сессии
             db_user = await session.get(UserDB, user_id)
             if db_user:
                 db_user.username = request.username
                 db_user.email = request.email
                 await session.commit()
                 await session.refresh(db_user)
-                print(f"✅ После обновления: {db_user.username}, {db_user.email}")
                 return {
                     "id": db_user.id,
                     "username": db_user.username,
@@ -756,7 +752,6 @@ async def update_profile(user_id: int, request: ProfileUpdateRequest):
                 }
             else:
                 raise HTTPException(status_code=404, detail="User not found in session")
-                
     except HTTPException:
         raise
     except Exception as e:
@@ -766,6 +761,6 @@ async def update_profile(user_id: int, request: ProfileUpdateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))   # Render ожидает порт из переменной окружения
+    port = int(os.getenv("PORT", 10000))
     print(f"🚀 Запуск ГИБРИДНОЙ рекомендательной системы на порту {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
