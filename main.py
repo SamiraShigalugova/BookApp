@@ -540,7 +540,7 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
     query = request.get("query", "")
-    user_id = request.get("user_id", 0)   # user_id пока не используется, но оставим
+    user_id = request.get("user_id", 0)
 
     if not query:
         raise HTTPException(status_code=400, detail="Query is required")
@@ -553,7 +553,7 @@ async def chat_recommend(request: dict):
 
     try:
         token = await get_cached_token()
-        response = await ask_gigachat(query, token)   # system_prompt уже внутри
+        response = await ask_gigachat(query, token)
 
         if "choices" in response and response["choices"]:
             content = response["choices"][0]["message"]["content"]
@@ -572,10 +572,18 @@ async def chat_recommend(request: dict):
             print("⚠️ GigaChat вернул пустой ответ")
     except Exception as e:
         print(f"❌ Ошибка GigaChat: {e}")
-        # Fallback – пытаемся извлечь ключевые слова из запроса
         keywords = query.lower().split()
         criteria["keywords"] = [w for w in keywords if len(w) > 3]
         print(f"   Используем fallback-ключевые слова: {criteria['keywords']}")
+
+    # ================= УЛУЧШЕНИЕ: если нет жанров, добавить популярные для "лёгкого" запроса =================
+    query_lower = query.lower()
+    if not criteria.get("genres") and ("лёгк" in query_lower or "легк" in query_lower or "вечер" in query_lower):
+        # Для запросов про лёгкое чтение на вечер
+        criteria["genres"] = ["romance", "adventure", "comedy", "fiction"]
+        print(f"   ✨ Добавлены жанры для лёгкого вечера: {criteria['genres']}")
+    elif not criteria.get("genres") and ("романтика" in query_lower or "любовь" in query_lower):
+        criteria["genres"] = ["romance"]
 
     # ================= ШАГ 2: Поиск по конкретным книгам =================
     def match_specific_book(rec, local_books):
@@ -607,11 +615,11 @@ async def chat_recommend(request: dict):
     print(f"📚 match: {len(local_results)}")
 
     # ================= ШАГ 3: Поиск по критериям =================
-    # Добавляем specific_books в критерии для более широкого поиска
     if llm_specific:
         criteria["specific_books"] = llm_specific
 
-    if len(local_results) < 10:
+    extra = []
+    if len(local_results) < 15:
         extra = search_local_books(criteria)
         print(f"   Найдено по критериям: {len(extra)}")
         seen = {b["id"] for b in local_results}
@@ -653,12 +661,32 @@ async def chat_recommend(request: dict):
         else:
             return {"results": [], "is_fallback": True}
 
-    # ================= ФИНАЛ: возвращаем до 10 книг (БЕЗ ПЕРСОНАЛИЗАЦИИ) =================
-    # Убедимся, что книги отсортированы по релевантности (search_local_books уже отсортировал,
-    # но после добавления OpenLibrary порядок мог нарушиться – отсортируем заново по среднему рейтингу)
-    # Чтобы не потерять релевантность, можно оставить как есть. Но для чистоты отсортируем по убыванию рейтинга.
-    final_results = sorted(local_results[:10], key=lambda b: b["volumeInfo"].get("averageRating", 0), reverse=True)
+    # ================= ФИНАЛ: добавляем разнообразие и перемешивание =================
+    # Группируем книги по score (если есть) – но search_local_books уже отсортировал.
+    # Чтобы избежать статичности, перемешаем книги с одинаковым рейтингом или добавим случайный сдвиг.
+    
+    # Получаем первые 15 книг (потом сократим до 10)
+    candidates = local_results[:15]
+    
+    # Перемешиваем, но сохраняем частичный порядок: сначала те, у кого высокий score,
+    # но внутри одной "score-группы" перемешиваем.
+    # Для простоты – просто перемешаем весь список, но оставим первые 5 из исходного порядка в топе?
+    # Лучше: берём топ-5 как есть, остальные перемешиваем.
+    if len(candidates) > 5:
+        top5 = candidates[:5]
+        rest = candidates[5:]
+        random.shuffle(rest)
+        final_results = (top5 + rest)[:10]
+    else:
+        final_results = candidates[:10]
+        random.shuffle(final_results)  # небольшое перемешивание даже для малого списка
+
     print(f"📤 Возвращаем {len(final_results)} книг")
+    for i, book in enumerate(final_results[:3]):
+        title = book["volumeInfo"]["title"]
+        rating = book["volumeInfo"].get("averageRating", 0)
+        print(f"   {i+1}. {title} (рейтинг: {rating})")
+    
     return {
         "results": final_results,
         "source": "llm+search",
