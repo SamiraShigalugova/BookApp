@@ -547,150 +547,100 @@ async def chat_recommend(request: dict):
 
     print(f"📝 Запрос чата: {query}, user_id={user_id}")
 
-    # ================= ШАГ 1: GigaChat =================
-    llm_specific = []
-    criteria = {"genres": [], "authors": [], "keywords": [], "min_rating": 0}
+    # ================= УЛУЧШЕННЫЙ ПРОМПТ ДЛЯ GIGACHAT =================
+    system_prompt = """
+Ты — эксперт по книгам. Твоя задача — преобразовать запрос пользователя в структурированные критерии для поиска книг.
 
+ВАЖНО: Всегда указывай жанры, даже если пользователь их не назвал. Для неявных запросов (например, "лёгкое на вечер") определи подходящие жанры: romance, comedy, adventure, short stories, poetry, self development.
+
+Верни ТОЛЬКО JSON в формате:
+{
+  "specific_books": [
+    {"title": "Название", "author": "Автор"}
+  ],
+  "criteria": {
+    "genres": ["жанр1", "жанр2"],
+    "authors": ["автор1"],
+    "keywords": ["слово1", "слово2"],
+    "min_rating": 0
+  }
+}
+
+Жанры указывай на английском из списка: romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance, comedy, short stories.
+
+Если пользователь просит "лёгкое на вечер" — genres: ["romance", "comedy", "adventure"], keywords: ["легкое", "вечер"].
+Если просит "популярное" или "лучшее" — установи min_rating: 4.0.
+Если спрашивает про похожесть на книгу — укажи её в specific_books.
+
+Не добавляй пояснений, только JSON.
+"""
     try:
         token = await get_cached_token()
-        response = await ask_gigachat(query, token)
-
-        if "choices" in response and response["choices"]:
-            content = response["choices"][0]["message"]["content"]
-            print(f"🤖 GigaChat content: {content}")
-
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                llm_specific = parsed.get("specific_books", [])
-                criteria.update(parsed.get("criteria", {}))
-                print(f"✅ LLM книги: {llm_specific}")
-                print(f"✅ criteria: {criteria}")
-            else:
-                print("⚠️ JSON не найден в ответе GigaChat")
+        response = await ask_gigachat(query, token, system_prompt)
+        content = response["choices"][0]["message"]["content"]
+        print(f"🤖 GigaChat: {content}")
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+            specific_books = parsed.get("specific_books", [])
+            criteria = parsed.get("criteria", {})
         else:
-            print("⚠️ GigaChat вернул пустой ответ")
+            specific_books = []
+            criteria = {}
     except Exception as e:
-        print(f"❌ Ошибка GigaChat: {e}")
-        keywords = query.lower().split()
-        criteria["keywords"] = [w for w in keywords if len(w) > 3]
-        print(f"   Используем fallback-ключевые слова: {criteria['keywords']}")
+        print(f"❌ GigaChat error: {e}")
+        specific_books = []
+        criteria = {"keywords": query.lower().split()[:5]}
 
-    # ================= УЛУЧШЕНИЕ: если нет жанров, добавить популярные для "лёгкого" запроса =================
-    query_lower = query.lower()
-    if not criteria.get("genres") and ("лёгк" in query_lower or "легк" in query_lower or "вечер" in query_lower):
-        # Для запросов про лёгкое чтение на вечер
-        criteria["genres"] = ["romance", "adventure", "comedy", "fiction"]
-        print(f"   ✨ Добавлены жанры для лёгкого вечера: {criteria['genres']}")
-    elif not criteria.get("genres") and ("романтика" in query_lower or "любовь" in query_lower):
-        criteria["genres"] = ["romance"]
+    # ================= ПОИСК =================
+    results = []
 
-    # ================= ШАГ 2: Поиск по конкретным книгам =================
-    def match_specific_book(rec, local_books):
-        title = rec.get("title", "").lower()
-        author = rec.get("author", "").lower()
-        best_match = None
-        best_score = 0
-        for book in local_books:
-            t = book.get("title", "").lower()
-            a = book.get("author", "").lower()
-            score = 0
-            if title and title in t:
-                score += 10
-            if author and author in a:
-                score += 5
-            if score > best_score:
-                best_score = score
-                best_match = book
-        if best_score > 0:
-            return best_match
-        return None
+    # 1. Поиск по конкретным книгам
+    for spec in specific_books:
+        for book in LOCAL_BOOKS:
+            if (spec.get("title", "").lower() in book["title"].lower() or
+                spec.get("author", "").lower() in book["author"].lower()):
+                results.append(book_to_google_book(book))
+                break
 
-    local_results = []
-    for rec in llm_specific:
-        matched = match_specific_book(rec, LOCAL_BOOKS)
-        if matched:
-            local_results.append(book_to_google_book(matched))
+    # 2. Поиск по локальным книгам через search_local_books (уже улучшенную)
+    if len(results) < 10:
+        local_found = search_local_books(criteria)
+        for book in local_found:
+            if book not in results:
+                results.append(book)
+                if len(results) >= 20:
+                    break
 
-    print(f"📚 match: {len(local_results)}")
-
-    # ================= ШАГ 3: Поиск по критериям =================
-    if llm_specific:
-        criteria["specific_books"] = llm_specific
-
-    extra = []
-    if len(local_results) < 15:
-        extra = search_local_books(criteria)
-        print(f"   Найдено по критериям: {len(extra)}")
-        seen = {b["id"] for b in local_results}
-        for b in extra:
-            if b["id"] not in seen:
-                local_results.append(b)
-                seen.add(b["id"])
-
-    print(f"📚 после criteria: {len(local_results)}")
-
-    # ================= ШАГ 4: OpenLibrary, если всё ещё мало =================
-    if len(local_results) < 5:
+    # 3. Если всё ещё мало (меньше 5) — идём в OpenLibrary
+    if len(results) < 5:
         try:
-            openlib = await search_openlibrary(criteria, limit=15 - len(local_results))
-            print(f"   Добавлено из OpenLibrary: {len(openlib)}")
-            seen = {b["id"] for b in local_results}
-            for b in openlib:
-                if b["id"] not in seen:
-                    local_results.append(b)
-                    seen.add(b["id"])
+            ol_books = await search_openlibrary(criteria, limit=15)
+            for book in ol_books:
+                if book not in results:
+                    results.append(book)
         except Exception as e:
-            print(f"❌ OpenLibrary ошибка: {e}")
+            print(f"OpenLibrary error: {e}")
 
-    print(f"📚 после openlib: {len(local_results)}")
-
-    # ================= ШАГ 5: Fallback (популярные) =================
-    if not local_results:
-        print("⚠️ Нет результатов, используем популярные книги")
+    # 4. Финальный fallback — книги с высоким рейтингом (но не одни и те же)
+    if not results:
         all_books = await data_collector.get_all_books()
         if all_books:
-            top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:50]
+            # Берём не просто популярные, а случайные из топ-100
+            top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:100]
             random.shuffle(top_books)
-            popular = [book_to_google_book(b) for b in top_books[:10]]
-            return {
-                "results": popular,
-                "source": "popular",
-                "is_fallback": True
-            }
-        else:
-            return {"results": [], "is_fallback": True}
+            results = [book_to_google_book(b) for b in top_books[:10]]
 
-    # ================= ФИНАЛ: добавляем разнообразие и перемешивание =================
-    # Группируем книги по score (если есть) – но search_local_books уже отсортировал.
-    # Чтобы избежать статичности, перемешаем книги с одинаковым рейтингом или добавим случайный сдвиг.
-    
-    # Получаем первые 15 книг (потом сократим до 10)
-    candidates = local_results[:15]
-    
-    # Перемешиваем, но сохраняем частичный порядок: сначала те, у кого высокий score,
-    # но внутри одной "score-группы" перемешиваем.
-    # Для простоты – просто перемешаем весь список, но оставим первые 5 из исходного порядка в топе?
-    # Лучше: берём топ-5 как есть, остальные перемешиваем.
-    if len(candidates) > 5:
-        top5 = candidates[:5]
-        rest = candidates[5:]
-        random.shuffle(rest)
-        final_results = (top5 + rest)[:10]
-    else:
-        final_results = candidates[:10]
-        random.shuffle(final_results)  # небольшое перемешивание даже для малого списка
-
-    print(f"📤 Возвращаем {len(final_results)} книг")
-    for i, book in enumerate(final_results[:3]):
-        title = book["volumeInfo"]["title"]
-        rating = book["volumeInfo"].get("averageRating", 0)
-        print(f"   {i+1}. {title} (рейтинг: {rating})")
-    
+    # ================= ВОЗВРАТ (без сортировки по рейтингу) =================
+    # Ограничиваем 10 книгами, но не меняем порядок
+    final = results[:10]
+    print(f"📤 Возвращаем {len(final)} книг")
+    for i, b in enumerate(final[:3]):
+        print(f"   {i+1}. {b['volumeInfo']['title']}")
     return {
-        "results": final_results,
+        "results": final,
         "source": "llm+search",
-        "is_fallback": False
+        "is_fallback": len(final) == 0
     }
 
 @app.get("/api/user/{user_id}/stats")
