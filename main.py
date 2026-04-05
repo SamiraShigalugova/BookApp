@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
 from pydantic import BaseModel, EmailStr
+from fastapi.responses import PlainTextResponse
 
 from data_models import *
 from data_collector import DataCollector, UserDB
@@ -738,7 +739,21 @@ async def update_profile(user_id: int, request: ProfileUpdateRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+# Путь к папке с текстами (создайте её в корне проекта)
+TEXTS_DIR = "book_texts"
 
+@app.get("/api/book/{book_id}/content", response_class=PlainTextResponse)
+async def get_book_content(book_id: str):
+    # Защита от подстановки путей
+    safe_id = book_id.replace("/", "").replace("\\", "").replace("..", "")
+    file_path = os.path.join(TEXTS_DIR, f"{safe_id}.txt")
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Текст книги не найден")
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return content
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     print(f"🚀 Запуск ГИБРИДНОЙ рекомендательной системы на порту {port}...")
