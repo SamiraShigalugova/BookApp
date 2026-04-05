@@ -110,6 +110,7 @@ class DataCollector:
                         average_rating=b.get("average_rating", 0.0),
                         cover_url=b.get("cover_url", ""),
                         description=b.get("description", ""),
+                        is_bestseller=b.get("is_bestseller", False)
                     )
                     session.add(book)
                 else:
@@ -121,6 +122,7 @@ class DataCollector:
                     book.average_rating = b.get("average_rating", 0.0)
                     book.cover_url = b.get("cover_url", "")
                     book.description = b.get("description", "")
+                    book.is_bestseller = b.get("is_bestseller", False) 
             await session.commit()
             print(f"✅ Добавлено {len(books)} книг в базу")
         await self._refresh_stats()
@@ -147,6 +149,7 @@ class DataCollector:
                         average_rating=book_data.get("average_rating", 0.0),
                         cover_url=book_data.get("cover_url", ""),
                         description=book_data.get("description", ""),
+                        is_bestseller=book_data.get("is_bestseller", False)
                     )
                     session.add(book)
                 else:
@@ -158,6 +161,7 @@ class DataCollector:
                     book.average_rating = book_data.get("average_rating", 0.0)
                     book.cover_url = book_data.get("cover_url", "")
                     book.description = book_data.get("description", "")
+                    book.is_bestseller = book_data.get("is_bestseller", False)
 
             # Проверяем существующее взаимодействие
             from sqlalchemy import select
