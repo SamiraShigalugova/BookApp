@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import select, delete, func, and_
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
-from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey
+from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey, Boolean
 from sqlalchemy.sql import func as sql_func
 from datetime import datetime, timezone
 
