@@ -377,10 +377,10 @@ def hash_password(password: str) -> str:
 async def register(request: RegisterRequest):
     existing = await data_collector.get_user_by_username(request.username)
     if existing:
-        raise HTTPException(status_code=400, detail="Username already taken")
+        raise HTTPException(status_code=400, detail="Имя пользователя уже занято")
     existing_email = await data_collector.get_user_by_email(request.email)
     if existing_email:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        raise HTTPException(status_code=400, detail="Email уже используется")
 
     password_hash = hash_password(request.password)
     user_id = await data_collector.create_user(request.username, request.email, password_hash)
@@ -397,9 +397,9 @@ async def register(request: RegisterRequest):
 async def login(request: LoginRequest):
     user = await data_collector.get_user_by_username(request.username)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Неверное имя пользователя или пароль")
     if user.password_hash != hash_password(request.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Неверное имя пользователя или пароль")
     await data_collector.update_last_login(user.id)
     return {"user_id": user.id, "username": user.username}
 
@@ -708,14 +708,14 @@ async def update_profile(user_id: int, request: ProfileUpdateRequest):
         print(f"🔵 ПОЛУЧЕН ЗАПРОС на обновление user_id={user_id}")
         user = await data_collector.get_user_by_id(user_id)
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
         existing_user = await data_collector.get_user_by_username(request.username)
         if existing_user and existing_user.id != user_id:
-            raise HTTPException(status_code=400, detail="Username already taken")
+            raise HTTPException(status_code=400, detail="Имя пользователя уже занято")
         if request.email:
             existing_email = await data_collector.get_user_by_email(request.email)
             if existing_email and existing_email.id != user_id:
-                raise HTTPException(status_code=400, detail="Email already registered")
+                raise HTTPException(status_code=400, detail="Email уже используется")
         async with data_collector.async_session() as session:
             db_user = await session.get(UserDB, user_id)
             if db_user:
