@@ -12,6 +12,7 @@ class BookData(BaseModel):
     average_rating: float = 0.0
     cover_url: str = ""
     description: str = ""
+    is_bestseller: bool
 
 class UserInteraction(BaseModel):
     user_id: int
