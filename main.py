@@ -744,6 +744,7 @@ TEXTS_DIR = "book_texts"
 
 @app.get("/api/book/{book_id}/content", response_class=PlainTextResponse)
 async def get_book_content(book_id: str):
+    print(f"🔍 Ищу текст для book_id = '{book_id}'")
     # Защита от подстановки путей
     safe_id = book_id.replace("/", "").replace("\\", "").replace("..", "")
     file_path = os.path.join(TEXTS_DIR, f"{safe_id}.txt")
