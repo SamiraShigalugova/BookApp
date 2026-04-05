@@ -75,6 +75,7 @@ try:
         book['tags'] = []
         book['description'] = book.get('description', '')
         book['cover_url'] = book.get('cover', '')
+        book['is_bestseller'] = book.get('is_bestseller', False) 
         LOCAL_BOOKS.append(book)
     print(f"✅ Загружено {len(LOCAL_BOOKS)} локальных книг")
 except Exception as e:
