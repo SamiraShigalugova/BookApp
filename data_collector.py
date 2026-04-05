@@ -33,6 +33,7 @@ class BookDB(Base):
     average_rating: Mapped[float] = mapped_column(Float, default=0.0)
     cover_url: Mapped[str] = mapped_column(String, default="")
     description: Mapped[str] = mapped_column(String, default="")
+    is_bestseller: Mapped[bool] = mapped_column(Boolean, default=False)
 
     def to_dict(self) -> Dict:
         return {
@@ -44,6 +45,7 @@ class BookDB(Base):
             "average_rating": self.average_rating,
             "cover_url": self.cover_url,
             "description": self.description,
+            "is_bestseller": self.is_bestseller,
         }
 
 
