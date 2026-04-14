@@ -575,6 +575,7 @@ async def build_system_prompt_with_history(history: List[Dict], user_id: int, da
     return base_prompt
 
 
+
 # ==================== ЭНДПОИНТ ЧАТА С СОХРАНЕНИЕМ ИСТОРИИ ====================
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
@@ -587,18 +588,19 @@ async def chat_recommend(request: dict):
 
     print(f"📝 Запрос чата: {query}, user_id={user_id}, session_id={session_id}")
 
+    # Сохраняем вопрос пользователя
     if user_id > 0:
         saved_id = await data_collector.save_chat_message(user_id, query, True, session_id)
         print(f"💾 Сохранён вопрос пользователя, id={saved_id}, session_id={session_id}")
     else:
         print("⚠️ user_id=0, история не сохраняется")
 
+    # Загружаем историю
     history = []
     if user_id > 0:
         history = await data_collector.get_chat_history(user_id, limit=10, session_id=session_id)
         print(f"📜 Загружено {len(history)} сообщений")
 
-    # Формируем промпт с учётом истории
     system_prompt = await build_system_prompt_with_history(history, user_id, data_collector)
 
     # --- Работа с GigaChat ---
@@ -624,7 +626,7 @@ async def chat_recommend(request: dict):
     # --- Поиск книг ---
     results = []
 
-    # 1. Поиск по конкретным книгам (локально)
+    # 1. Поиск по конкретным книгам
     for spec in specific_books:
         for book in LOCAL_BOOKS:
             if (spec.get("title", "").lower() in book["title"].lower() or
@@ -632,7 +634,7 @@ async def chat_recommend(request: dict):
                 results.append(book_to_google_book(book))
                 break
 
-    # 2. Поиск по локальным книгам через search_local_books
+    # 2. Поиск по локальным книгам
     if len(results) < 10:
         local_found = search_local_books(criteria)
         for book in local_found:
@@ -641,7 +643,7 @@ async def chat_recommend(request: dict):
                 if len(results) >= 20:
                     break
 
-    # 3. Если всё ещё мало — идём в OpenLibrary
+    # 3. OpenLibrary
     if len(results) < 5:
         try:
             ol_books = await search_openlibrary(criteria, limit=15)
@@ -651,7 +653,7 @@ async def chat_recommend(request: dict):
         except Exception as e:
             print(f"OpenLibrary error: {e}")
 
-    # 4. Абсолютный fallback (популярные книги)
+    # 4. Fallback
     if not results:
         all_books = await data_collector.get_all_books()
         if all_books:
@@ -659,25 +661,24 @@ async def chat_recommend(request: dict):
             random.shuffle(top_books)
             results = [book_to_google_book(b) for b in top_books[:10]]
 
-    # Сохраняем ответ ассистента
-    if user_id > 0 and results:
-        assistant_data = {
-            "type": "books",
-            "books": final  # список book_to_google_book
-        }
-        await data_collector.save_chat_message(
-            user_id, 
-            message="",  # текст не нужен, но можно оставить краткое описание
-            is_from_user=False, 
-            session_id=session_id,
-            data=assistant_data
-        )
-
-    # Возвращаем до 10 книг
     final = results[:10]
     print(f"📤 Возвращаем {len(final)} книг")
     for i, b in enumerate(final[:3]):
         print(f"   {i+1}. {b['volumeInfo']['title']}")
+
+    # Сохраняем ответ ассистента (один раз, после получения final)
+    if user_id > 0 and results:
+        assistant_data = {
+            "type": "books",
+            "books": final
+        }
+        await data_collector.save_chat_message(
+            user_id=user_id,
+            message=f"Найдено книг: {len(final)}",
+            is_from_user=False,
+            session_id=session_id,
+            data=assistant_data
+        )
 
     return {
         "results": final,
