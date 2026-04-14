@@ -539,27 +539,15 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/chat_recommend")
-async def chat_recommend(request: dict):
-    query = request.get("query", "")
-    user_id = request.get("user_id", 0)
-
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
-
-    print(f"📝 Запрос чата: {query}, user_id={user_id}")
-
-    # ================= УЛУЧШЕННЫЙ ПРОМПТ ДЛЯ GIGACHAT =================
-    system_prompt = """
+# ==================== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ПРОМПТА ====================
+async def build_system_prompt_with_history(history: List[Dict], user_id: int, data_collector) -> str:
+    # Базовый системный промпт
+    base_prompt = """
 Ты — эксперт по книгам. Твоя задача — преобразовать запрос пользователя в структурированные критерии для поиска книг.
 
-ВАЖНО: Всегда указывай жанры, даже если пользователь их не назвал. Для неявных запросов (например, "лёгкое на вечер") определи подходящие жанры: romance, comedy, adventure, short stories, poetry, self development.
-
-Верни ТОЛЬКО JSON в формате:
+Верни ТОЛЬКО JSON в точном формате:
 {
-  "specific_books": [
-    {"title": "Название", "author": "Автор"}
-  ],
+  "specific_books": [{"title": "...", "author": "..."}],
   "criteria": {
     "genres": ["жанр1", "жанр2"],
     "authors": ["автор1"],
@@ -568,19 +556,89 @@ async def chat_recommend(request: dict):
   }
 }
 
-Жанры указывай на английском из списка: romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance, comedy, short stories.
+Правила определения критериев:
 
-Если пользователь просит "лёгкое на вечер" — genres: ["romance", "comedy", "adventure"], keywords: ["легкое", "вечер"].
-Если просит "популярное" или "лучшее" — установи min_rating: 4.0.
-Если спрашивает про похожесть на книгу — укажи её в specific_books.
+1. Если пользователь упоминает конкретную книгу или автора — обязательно укажи её/его в specific_books.
+   Пример: «хочу что-то похожее на Гарри Поттера» → specific_books: [{"title": "Harry Potter", "author": "J.K. Rowling"}]
 
-Не добавляй пояснений, только JSON.
+2. Для запросов по настроению или неявных описаний самостоятельно определи подходящие жанры и ключевые слова.
+   Примеры:
+   - «лёгкое на вечер», «романтичное», «уютное» → genres: ["romance", "comedy", "short stories"], keywords: ["легкое", "вечер", "романтика"]
+   - «страшное», «жуткое», «держит в напряжении» → genres: ["horror", "thriller"], keywords: ["страшно", "ужасы"]
+   - «умное», «заставляет задуматься» → genres: ["philosophy", "science", "self development"]
+   - «приключения», «путешествия» → genres: ["adventure"]
+   - «фантастика про космос» → genres: ["science fiction"], keywords: ["космос"]
+   - «детектив с неожиданной развязкой» → genres: ["mystery", "thriller"]
+
+3. Если пользователь просит «популярное», «лучшее», «топ» — установи min_rating: 4.0.
+
+4. Жанры указывай на английском из строгого списка:
+   romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance, comedy, short stories, drama, travel.
+
+5. Если пользователь не указал ни жанр, ни автора, ни конкретную книгу — используй keywords из самых значимых слов запроса (существительные, прилагательные), отбросив стоп-слова («посоветуй», «пожалуйста», «хочу»).
+
+6. Не добавляй пояснений к ответу — только JSON.
+
+7. Если запрос слишком общий (например, «посоветуй книгу») — оставь specific_books пустым, а criteria.genres = ["fiction"], keywords = ["интересная"].
+
+Никогда не выходи за рамки JSON. Не используй markdown, не добавляй текста до или после JSON.
 """
+
+    # Добавляем персонализацию: любимые жанры пользователя
+    if user_id > 0:
+        interactions = await data_collector.get_user_interactions(user_id)
+        high_rated_genres = set()
+        for inter in interactions:
+            if inter.get("rating", 0) >= 4:
+                book = await data_collector.get_book_by_id(inter["book_id"])
+                if book:
+                    high_rated_genres.add(book.get("genre", ""))
+        if high_rated_genres:
+            genres_str = ", ".join(high_rated_genres)
+            base_prompt += f"\n\nПользователь предпочитает жанры: {genres_str}. Учитывай это при рекомендациях."
+
+    # Добавляем историю диалога (последние 5 сообщений)
+    if history:
+        base_prompt += "\n\nИстория диалога:\n"
+        for msg in history[-5:]:
+            role = "Пользователь" if msg["is_from_user"] else "Ассистент"
+            base_prompt += f"{role}: {msg['message']}\n"
+        base_prompt += "\nТеперь ответь на последний запрос пользователя, учитывая историю."
+
+    return base_prompt
+
+
+# ==================== ЭНДПОИНТ ЧАТА С СОХРАНЕНИЕМ ИСТОРИИ ====================
+@app.post("/api/chat_recommend")
+async def chat_recommend(request: dict):
+    query = request.get("query", "")
+    user_id = request.get("user_id", 0)
+    session_id = request.get("session_id", None)
+
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    print(f"📝 Запрос чата: {query}, user_id={user_id}, session_id={session_id}")
+
+    # Сохраняем вопрос пользователя в БД
+    if user_id > 0:
+        await data_collector.save_chat_message(user_id, query, True, session_id)
+
+    # Получаем историю переписки (последние 10 сообщений)
+    history = []
+    if user_id > 0:
+        history = await data_collector.get_chat_history(user_id, limit=10, session_id=session_id)
+
+    # Формируем персонализированный системный промпт
+    system_prompt = await build_system_prompt_with_history(history, user_id, data_collector)
+
+    # --- Работа с GigaChat ---
     try:
         token = await get_cached_token()
         response = await ask_gigachat(query, token, system_prompt)
         content = response["choices"][0]["message"]["content"]
         print(f"🤖 GigaChat: {content}")
+
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             parsed = json.loads(json_match.group())
@@ -594,10 +652,10 @@ async def chat_recommend(request: dict):
         specific_books = []
         criteria = {"keywords": query.lower().split()[:5]}
 
-    # ================= ПОИСК =================
+    # --- Поиск книг ---
     results = []
 
-    # 1. Поиск по конкретным книгам
+    # 1. Поиск по конкретным книгам (локально)
     for spec in specific_books:
         for book in LOCAL_BOOKS:
             if (spec.get("title", "").lower() in book["title"].lower() or
@@ -605,7 +663,7 @@ async def chat_recommend(request: dict):
                 results.append(book_to_google_book(book))
                 break
 
-    # 2. Поиск по локальным книгам через search_local_books (уже улучшенную)
+    # 2. Поиск по локальным книгам через search_local_books
     if len(results) < 10:
         local_found = search_local_books(criteria)
         for book in local_found:
@@ -614,7 +672,7 @@ async def chat_recommend(request: dict):
                 if len(results) >= 20:
                     break
 
-    # 3. Если всё ещё мало (меньше 5) — идём в OpenLibrary
+    # 3. Если всё ещё мало — идём в OpenLibrary
     if len(results) < 5:
         try:
             ol_books = await search_openlibrary(criteria, limit=15)
@@ -624,21 +682,25 @@ async def chat_recommend(request: dict):
         except Exception as e:
             print(f"OpenLibrary error: {e}")
 
-    # 4. Финальный fallback — книги с высоким рейтингом (но не одни и те же)
+    # 4. Абсолютный fallback (популярные книги)
     if not results:
         all_books = await data_collector.get_all_books()
         if all_books:
-            # Берём не просто популярные, а случайные из топ-100
             top_books = sorted(all_books, key=lambda x: x.get("average_rating", 0), reverse=True)[:100]
             random.shuffle(top_books)
             results = [book_to_google_book(b) for b in top_books[:10]]
 
-    # ================= ВОЗВРАТ (без сортировки по рейтингу) =================
-    # Ограничиваем 10 книгами, но не меняем порядок
+    # Сохраняем ответ ассистента (краткую информацию о результате)
+    if user_id > 0 and results:
+        assistant_message = f"Найдено книг: {len(results)}. Первая: {results[0]['volumeInfo']['title']}"
+        await data_collector.save_chat_message(user_id, assistant_message, False, session_id)
+
+    # Возвращаем до 10 книг
     final = results[:10]
     print(f"📤 Возвращаем {len(final)} книг")
     for i, b in enumerate(final[:3]):
         print(f"   {i+1}. {b['volumeInfo']['title']}")
+
     return {
         "results": final,
         "source": "llm+search",
