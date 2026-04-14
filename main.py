@@ -659,10 +659,19 @@ async def chat_recommend(request: dict):
             random.shuffle(top_books)
             results = [book_to_google_book(b) for b in top_books[:10]]
 
-    # Сохраняем ответ ассистента (краткую информацию о результате)
+    # Сохраняем ответ ассистента
     if user_id > 0 and results:
-        assistant_message = f"Найдено книг: {len(results)}. Первая: {results[0]['volumeInfo']['title']}"
-        await data_collector.save_chat_message(user_id, assistant_message, False, session_id)
+        assistant_data = {
+            "type": "books",
+            "books": final  # список book_to_google_book
+        }
+        await data_collector.save_chat_message(
+            user_id, 
+            message="",  # текст не нужен, но можно оставить краткое описание
+            is_from_user=False, 
+            session_id=session_id,
+            data=assistant_data
+        )
 
     # Возвращаем до 10 книг
     final = results[:10]
