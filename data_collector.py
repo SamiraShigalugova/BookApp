@@ -78,7 +78,7 @@ class ChatHistoryDB(Base):
     is_from_user: Mapped[bool] = mapped_column(Boolean, nullable=False)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=sql_func.now())
     session_id: Mapped[str] = mapped_column(String, nullable=True)
-
+    data: Mapped[Dict] = mapped_column(JSON, default={}
     def to_dict(self) -> Dict:
         return {
             "id": self.id,
@@ -87,6 +87,7 @@ class ChatHistoryDB(Base):
             "is_from_user": self.is_from_user,
             "timestamp": self.timestamp.isoformat(),
             "session_id": self.session_id,
+            "data": self.data,
         }
 
 
