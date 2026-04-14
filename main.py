@@ -786,6 +786,11 @@ async def get_book_content(book_id: str):
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
     return content
+@app.get("/api/chat_history/{user_id}")
+async def get_chat_history(user_id: int, session_id: str = None):
+    """Возвращает историю чата пользователя (опционально по session_id)"""
+    history = await data_collector.get_chat_history(user_id, limit=100, session_id=session_id)
+    return {"history": history}
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     print(f"🚀 Запуск ГИБРИДНОЙ рекомендательной системы на порту {port}...")
