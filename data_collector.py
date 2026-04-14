@@ -69,6 +69,27 @@ class InteractionDB(Base):
         }
 
 
+class ChatHistoryDB(Base):
+    __tablename__ = "chat_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    message: Mapped[str] = mapped_column(String, nullable=False)
+    is_from_user: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=sql_func.now())
+    session_id: Mapped[str] = mapped_column(String, nullable=True)
+
+    def to_dict(self) -> Dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "message": self.message,
+            "is_from_user": self.is_from_user,
+            "timestamp": self.timestamp.isoformat(),
+            "session_id": self.session_id,
+        }
+
+
 # --- DataCollector ---
 class DataCollector:
     def __init__(self, database_url: str):
@@ -122,7 +143,7 @@ class DataCollector:
                     book.average_rating = b.get("average_rating", 0.0)
                     book.cover_url = b.get("cover_url", "")
                     book.description = b.get("description", "")
-                    book.is_bestseller = b.get("is_bestseller", False) 
+                    book.is_bestseller = b.get("is_bestseller", False)
             await session.commit()
             print(f"✅ Добавлено {len(books)} книг в базу")
         await self._refresh_stats()
@@ -214,6 +235,12 @@ class DataCollector:
             books = result.scalars().all()
             return [b.to_dict() for b in books]
 
+    async def get_book_by_id(self, book_id: str) -> Optional[Dict]:
+        """Возвращает книгу по id."""
+        async with self.async_session() as session:
+            book = await session.get(BookDB, book_id)
+            return book.to_dict() if book else None
+
     async def get_user_stats(self, user_id: int) -> Dict:
         """Статистика пользователя."""
         async with self.async_session() as session:
@@ -246,7 +273,7 @@ class DataCollector:
         except Exception:
             return False
 
-    # --- Новые методы для работы с пользователями ---
+    # --- Методы для работы с пользователями ---
     async def create_user(self, username: str, email: str, password_hash: str) -> int:
         async with self.async_session() as session:
             user = UserDB(username=username, email=email, password_hash=password_hash)
@@ -275,3 +302,35 @@ class DataCollector:
         async with self.async_session() as session:
             result = await session.execute(select(UserDB).where(UserDB.email == email))
             return result.scalar_one_or_none()
+
+    # --- Методы для работы с историей чата ---
+    async def save_chat_message(self, user_id: int, message: str, is_from_user: bool, session_id: str = None) -> int:
+        async with self.async_session() as session:
+            chat = ChatHistoryDB(
+                user_id=user_id,
+                message=message,
+                is_from_user=is_from_user,
+                session_id=session_id
+            )
+            session.add(chat)
+            await session.commit()
+            await session.refresh(chat)
+            return chat.id
+
+    async def get_chat_history(self, user_id: int, limit: int = 20, session_id: str = None) -> List[Dict]:
+        async with self.async_session() as session:
+            query = select(ChatHistoryDB).where(ChatHistoryDB.user_id == user_id)
+            if session_id:
+                query = query.where(ChatHistoryDB.session_id == session_id)
+            query = query.order_by(ChatHistoryDB.timestamp.asc()).limit(limit)
+            result = await session.execute(query)
+            return [row.to_dict() for row in result.scalars().all()]
+
+    async def clear_chat_history(self, user_id: int, session_id: str = None) -> bool:
+        async with self.async_session() as session:
+            query = delete(ChatHistoryDB).where(ChatHistoryDB.user_id == user_id)
+            if session_id:
+                query = query.where(ChatHistoryDB.session_id == session_id)
+            await session.execute(query)
+            await session.commit()
+            return True
