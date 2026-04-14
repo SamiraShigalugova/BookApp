@@ -541,7 +541,7 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
 
 # ==================== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ПРОМПТА ====================
 async def build_system_prompt_with_history(history: List[Dict], user_id: int, data_collector) -> str:
-    # Базовый системный промпт
+    # Базовый системный промпт (без автоматических жанров)
     base_prompt = """
 Ты — эксперт по книгам. Твоя задача — преобразовать запрос пользователя в структурированные критерии для поиска книг.
 
@@ -556,48 +556,15 @@ async def build_system_prompt_with_history(history: List[Dict], user_id: int, da
   }
 }
 
-Правила определения критериев:
-
-1. Если пользователь упоминает конкретную книгу или автора — обязательно укажи её/его в specific_books.
-   Пример: «хочу что-то похожее на Гарри Поттера» → specific_books: [{"title": "Harry Potter", "author": "J.K. Rowling"}]
-
-2. Для запросов по настроению или неявных описаний самостоятельно определи подходящие жанры и ключевые слова.
-   Примеры:
-   - «лёгкое на вечер», «романтичное», «уютное» → genres: ["romance", "comedy", "short stories"], keywords: ["легкое", "вечер", "романтика"]
-   - «страшное», «жуткое», «держит в напряжении» → genres: ["horror", "thriller"], keywords: ["страшно", "ужасы"]
-   - «умное», «заставляет задуматься» → genres: ["philosophy", "science", "self development"]
-   - «приключения», «путешествия» → genres: ["adventure"]
-   - «фантастика про космос» → genres: ["science fiction"], keywords: ["космос"]
-   - «детектив с неожиданной развязкой» → genres: ["mystery", "thriller"]
-
-3. Если пользователь просит «популярное», «лучшее», «топ» — установи min_rating: 4.0.
-
-4. Жанры указывай на английском из строгого списка:
-   romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance, comedy, short stories, drama, travel.
-
-5. Если пользователь не указал ни жанр, ни автора, ни конкретную книгу — используй keywords из самых значимых слов запроса (существительные, прилагательные), отбросив стоп-слова («посоветуй», «пожалуйста», «хочу»).
-
-6. Не добавляй пояснений к ответу — только JSON.
-
-7. Если запрос слишком общий (например, «посоветуй книгу») — оставь specific_books пустым, а criteria.genres = ["fiction"], keywords = ["интересная"].
-
-Никогда не выходи за рамки JSON. Не используй markdown, не добавляй текста до или после JSON.
+Правила:
+1. Если пользователь упоминает конкретную книгу или автора — укажи в specific_books.
+2. Для неявных запросов (настроение, тема) самостоятельно определи жанры и ключевые слова.
+3. Жанры указывай на английском из списка: romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance, comedy, short stories.
+4. Если пользователь просит «популярное» или «лучшее» — установи min_rating: 4.0.
+5. Не добавляй пояснений, только JSON.
 """
 
-    # Добавляем персонализацию: любимые жанры пользователя
-    if user_id > 0:
-        interactions = await data_collector.get_user_interactions(user_id)
-        high_rated_genres = set()
-        for inter in interactions:
-            if inter.get("rating", 0) >= 4:
-                book = await data_collector.get_book_by_id(inter["book_id"])
-                if book:
-                    high_rated_genres.add(book.get("genre", ""))
-        if high_rated_genres:
-            genres_str = ", ".join(high_rated_genres)
-            base_prompt += f"\n\nПользователь предпочитает жанры: {genres_str}. Учитывай это при рекомендациях."
-
-    # Добавляем историю диалога (последние 5 сообщений)
+    # Добавляем историю диалога (последние 5 сообщений) — это помогает уточнять контекст
     if history:
         base_prompt += "\n\nИстория диалога:\n"
         for msg in history[-5:]:
@@ -620,16 +587,18 @@ async def chat_recommend(request: dict):
 
     print(f"📝 Запрос чата: {query}, user_id={user_id}, session_id={session_id}")
 
-    # Сохраняем вопрос пользователя в БД
     if user_id > 0:
-        await data_collector.save_chat_message(user_id, query, True, session_id)
+        saved_id = await data_collector.save_chat_message(user_id, query, True, session_id)
+        print(f"💾 Сохранён вопрос пользователя, id={saved_id}, session_id={session_id}")
+    else:
+        print("⚠️ user_id=0, история не сохраняется")
 
-    # Получаем историю переписки (последние 10 сообщений)
     history = []
     if user_id > 0:
         history = await data_collector.get_chat_history(user_id, limit=10, session_id=session_id)
+        print(f"📜 Загружено {len(history)} сообщений")
 
-    # Формируем персонализированный системный промпт
+    # Формируем промпт с учётом истории
     system_prompt = await build_system_prompt_with_history(history, user_id, data_collector)
 
     # --- Работа с GigaChat ---
