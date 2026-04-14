@@ -304,13 +304,14 @@ class DataCollector:
             return result.scalar_one_or_none()
 
     # --- Методы для работы с историей чата ---
-    async def save_chat_message(self, user_id: int, message: str, is_from_user: bool, session_id: str = None) -> int:
+    async def save_chat_message(self, user_id: int, message: str, is_from_user: bool, session_id: str = None, data: Dict = None) -> int:
         async with self.async_session() as session:
             chat = ChatHistoryDB(
                 user_id=user_id,
                 message=message,
                 is_from_user=is_from_user,
-                session_id=session_id
+                session_id=session_id,
+                data=data or {}
             )
             session.add(chat)
             await session.commit()
