@@ -83,6 +83,20 @@ except Exception as e:
     print(f"❌ Ошибка загрузки локальных книг: {e}")
 
 # ==================== ФУНКЦИИ ПОИСКА ====================
+
+
+def normalize_author(name: str) -> str:
+    """Нормализует имя автора: убирает инициалы и точки, оставляет фамилию (или самую длинную часть)"""
+    if not name:
+        return ""
+    # Убираем точки, запятые, лишние пробелы
+    cleaned = re.sub(r'[.,]', '', name).strip()
+    parts = cleaned.split()
+    if not parts:
+        return ""
+    # Если больше одного слова, ищем самое длинное (скорее всего фамилия)
+    return max(parts, key=len).lower()
+
 def search_local_books(criteria: dict) -> list:
     """
     Поиск по локальным книгам.
@@ -134,9 +148,14 @@ def search_local_books(criteria: dict) -> list:
             elif any(g in book_genre for g in expanded_genres):
                 score += 5
 
-        # 3. Авторы
-        if authors and any(a in book_author for a in authors):
-            score += 5
+        # 3. Авторы с нормализацией (поиск по подстроке в фамилии)
+        if authors:
+            book_author_norm = normalize_author(book_author)
+            for a in authors:
+                a_norm = normalize_author(a)
+                # Проверяем вхождение нормализованного имени
+                if a_norm in book_author_norm or a in book_author:
+                    score += 5
 
         # 4. Ключевые слова (в заголовке, описании, жанре)
         if keywords:
@@ -152,6 +171,7 @@ def search_local_books(criteria: dict) -> list:
         if score > 0:
             results.append((book, score))
 
+    # Сортировка по убыванию score
     results.sort(key=lambda x: x[1], reverse=True)
     return [book_to_google_book(book) for book, _ in results[:max_results]]
 
@@ -801,6 +821,35 @@ async def get_chat_history(user_id: int, session_id: str = None):
     """Возвращает историю чата пользователя (опционально по session_id)"""
     history = await data_collector.get_chat_history(user_id, limit=100, session_id=session_id)
     return {"history": history}
+
+@app.get("/api/search")
+async def search_books(q: str, user_id: int = 0):
+    """
+    Обычный поиск книг по названию или автору (без сохранения в историю чата)
+    """
+    if not q:
+        return {"results": []}
+    
+    query_lower = q.lower().strip()
+    results = []
+    
+    for book in LOCAL_BOOKS:
+        title_match = query_lower in book["title"].lower()
+        author_match = query_lower in book["author"].lower()
+        if title_match or author_match:
+            results.append(book_to_google_book(book))
+            if len(results) >= 20:
+                break
+    
+    # Если ничего не нашли, пробуем через OpenLibrary
+    if not results:
+        try:
+            ol_results = await search_openlibrary({"keywords": [query_lower]}, limit=10)
+            results.extend(ol_results)
+        except Exception:
+            pass
+    
+    return {"results": results[:20]}
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 10000))
     print(f"🚀 Запуск ГИБРИДНОЙ рекомендательной системы на порту {port}...")
