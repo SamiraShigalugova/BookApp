@@ -13,6 +13,7 @@ class BookData(BaseModel):
     cover_url: str = ""
     description: str = ""
     is_bestseller: bool = False
+    playlist_url: str = "" 
 
 class UserInteraction(BaseModel):
     user_id: int
