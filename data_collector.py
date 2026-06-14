@@ -96,7 +96,14 @@ class ChatHistoryDB(Base):
 # --- DataCollector ---
 class DataCollector:
     def __init__(self, database_url: str):
-        self.engine = create_async_engine(database_url, echo=False)
+        self.engine = create_async_engine(
+            database_url,
+            echo=False,
+            connect_args={
+                "statement_cache_size": 0,
+                "prepared_statement_cache_size": 0
+            }
+        )
         self.async_session = async_sessionmaker(self.engine, expire_on_commit=False)
         self._stats_cache = {"total_interactions": 0, "unique_users": 0, "unique_books": 0}
 
