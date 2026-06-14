@@ -147,7 +147,7 @@ class DataCollector:
                     book.average_rating = b.get("average_rating", 0.0)
                     book.cover_url = b.get("cover_url", "")
                     book.description = b.get("description", "")
-                    book.is_bestseller = b.get("is_bestseller", False),
+                    book.is_bestseller = b.get("is_bestseller", False)
                     book.playlist_url = b.get("playlist_url", "")
             await session.commit()
             print(f"✅ Добавлено {len(books)} книг в базу")
