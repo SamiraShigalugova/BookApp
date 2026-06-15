@@ -441,7 +441,8 @@ async def get_user_books(user_id: int):
                 "average_rating": book["average_rating"],
                 "status": inter["status"],
                 "user_rating": inter["rating"],
-                "global_id": book["id"]
+                "global_id": book["id"],
+                "playlist_url": book.get("playlist_url", "") 
             })
     return result
 
@@ -454,6 +455,7 @@ class UserBookUpdate(BaseModel):
     description: str = ""
     status: str
     rating: float = 0.0
+    playlist_url: str = "" 
 
 @app.post("/api/user/{user_id}/book")
 async def update_user_book(user_id: int, request: UserBookUpdate):
@@ -465,7 +467,8 @@ async def update_user_book(user_id: int, request: UserBookUpdate):
         "cover_url": request.cover_url,
         "description": request.description,
         "average_rating": 0.0,
-        "tags": []
+        "tags": [],
+        "playlist_url": request.playlist_url 
     }
     await data_collector.add_interaction(
         user_id=user_id,
