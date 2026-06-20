@@ -30,21 +30,22 @@ if "postgresql" in DATABASE_URL and "+asyncpg" not in DATABASE_URL:
     print(f"✅ Преобразованный DATABASE_URL для asyncpg: {DATABASE_URL}")
 
 GENRE_MAP = {
-    "romance": ["романтика", "любовный роман"],
-    "fantasy": ["фэнтези"],
-    "science fiction": ["научная фантастика", "фантастика"],
-    "mystery": ["детектив", "мистика"],
-    "thriller": ["триллер"],
-    "horror": ["ужасы"],
-    "adventure": ["приключения"],
-    "classics": ["классика"],
-    "poetry": ["поэзия"],
-    "biography": ["биография"],
-    "history": ["история"],
-    "philosophy": ["философия"],
-    "self development": ["саморазвитие", "психология"],
-    "business": ["бизнес"],
-    "finance": ["финансы"],
+    "romance": ["романтика", "любовный роман", "любовь", "отношения"],
+    "fantasy": ["фэнтези", "магия", "волшебство", "магическая академия"],
+    "science fiction": ["научная фантастика", "фантастика", "антиутопия", "космос", "будущее"],
+    "mystery": ["детектив", "расследование", "тайна", "преступление"],
+    "thriller": ["триллер", "психологический триллер", "саспенс", "напряжение"],
+    "horror": ["ужасы", "хоррор", "страшное", "мистика", "мрачный", "триллер"],
+    "adventure": ["приключения", "путешествие", "авантюра"],
+    "classics": ["классика", "классическая проза"],
+    "children": ["детская литература", "детское фэнтези", "сказки"],
+    "poetry": ["поэзия", "стихи"],
+    "biography": ["биография", "мемуары"],
+    "history": ["история", "историческая литература"],
+    "philosophy": ["философия", "стоицизм", "экзистенциализм"],
+    "self development": ["саморазвитие", "психология", "личностный рост"],
+    "business": ["бизнес", "предпринимательство", "менеджмент", "маркетинг"],
+    "finance": ["финансы", "деньги", "инвестиции", "финансовая грамотность"],
 }
 
 def expand_genres(genres: List[str]) -> List[str]:
@@ -56,6 +57,51 @@ def expand_genres(genres: List[str]) -> List[str]:
         if g_lower in GENRE_MAP:
             expanded.extend(GENRE_MAP[g_lower])
     return list(set(expanded))
+    
+def normalize_requested_genres(genres: List[str], keywords: List[str]) -> List[str]:
+    text = " ".join(genres + keywords).lower()
+
+    normalized = []
+
+    if any(w in text for w in ["ужасы", "ужас", "хоррор", "страш", "мрачн", "жутк", "пугающ", "мистик"]):
+        normalized.extend(["horror", "thriller", "mystery"])
+
+    if any(w in text for w in ["триллер", "напряж", "саспенс", "психологическ"]):
+        normalized.extend(["thriller", "mystery"])
+
+    if any(w in text for w in ["детектив", "расслед", "преступ", "убийств", "тайн"]):
+        normalized.extend(["mystery", "thriller"])
+
+    if any(w in text for w in ["романтик", "любов", "отношен", "чувств"]):
+        normalized.append("romance")
+
+    if any(w in text for w in ["фэнтези", "маг", "волшеб", "дракон", "академ"]):
+        normalized.append("fantasy")
+
+    if any(w in text for w in ["фантаст", "космос", "робот", "будущ", "антиутоп"]):
+        normalized.append("science fiction")
+
+    if any(w in text for w in ["детск", "ребен", "ребён", "сказк", "подрост"]):
+        normalized.append("children")
+
+    if any(w in text for w in ["философ", "стоиц", "смысл", "жизн", "камю", "ницше"]):
+        normalized.append("philosophy")
+
+    if any(w in text for w in ["саморазвит", "привыч", "мотивац", "продуктив", "психолог"]):
+        normalized.append("self development")
+
+    if any(w in text for w in ["бизнес", "стартап", "предприним", "менеджмент", "маркетинг"]):
+        normalized.append("business")
+
+    if any(w in text for w in ["финанс", "деньг", "инвест", "капитал", "богат"]):
+        normalized.append("finance")
+
+    for g in genres:
+        g_lower = g.lower().strip()
+        if g_lower and g_lower not in normalized:
+            normalized.append(g_lower)
+
+    return list(dict.fromkeys(normalized))
 
 def generate_global_id(title: str, author: str) -> str:
     base = f"{title}|{author}".lower()
@@ -94,81 +140,205 @@ def normalize_author(name: str) -> str:
     return max(parts, key=len).lower()
 
 def search_local_books(criteria: dict) -> list:
-    """
-    Поиск по локальным книгам.
-    criteria может содержать:
-      - specific_books: list[{"title":..., "author":...}]
-      - genres: list[str] 
-      - authors: list[str]
-      - keywords: list[str]
-      - min_rating: float
-      - max_results: int
-    """
+
+
     specific_books = criteria.get("specific_books", [])
     genres = criteria.get("genres", [])
-    expanded_genres = expand_genres(genres) if genres else []
-    keywords = [k.lower() for k in criteria.get("keywords", [])]
-    authors = [a.lower() for a in criteria.get("authors", [])]
+    keywords = [k.lower().strip() for k in criteria.get("keywords", []) if k]
+    authors = [a.lower().strip() for a in criteria.get("authors", []) if a]
     min_rating = criteria.get("min_rating", 0)
     max_results = criteria.get("max_results", 20)
+
+    genres = normalize_requested_genres(genres, keywords)
+    expanded_genres = expand_genres(genres) if genres else []
 
     if not expanded_genres and not keywords and not authors and not specific_books:
         all_books = list(LOCAL_BOOKS)
         random.shuffle(all_books)
         return [book_to_google_book(book) for book in all_books[:max_results]]
 
-    results = []
+    request_text = " ".join(genres + keywords).lower()
+
+    is_horror_request = any(
+        w in request_text
+        for w in [
+            "horror", "ужасы", "ужас", "страш", "хоррор",
+            "мрачн", "жутк", "пугающ", "мистик", "кошмар"
+        ]
+    )
+
+    is_thriller_request = any(
+        w in request_text
+        for w in [
+            "thriller", "триллер", "напряж", "саспенс",
+            "психологическ", "опасн"
+        ]
+    )
+
+    scored_results = []
+
     for book in LOCAL_BOOKS:
         score = 0
+
         book_genre = book.get("genre", "").lower()
         book_title = book.get("title", "").lower()
         book_author = book.get("author", "").lower()
         book_desc = book.get("description", "").lower()
-        avg_rating = book.get("average_rating", 0)
+        avg_rating = float(book.get("average_rating", 0) or 0)
 
-        # 1. Похожесть на конкретные книги (самый высокий вес)
+        full_text = f"{book_title} {book_author} {book_genre} {book_desc}"
+
         for spec in specific_books:
-            spec_title = spec.get("title", "").lower()
-            spec_author = spec.get("author", "").lower()
+            spec_title = spec.get("title", "").lower().strip()
+            spec_author = spec.get("author", "").lower().strip()
+
+            if spec_title and spec_title in book_title:
+                score += 35
+
+            if spec_author and spec_author in book_author:
+                score += 15
+
             if spec_title and spec_author:
-                if spec_title in book_title or spec_author in book_author:
-                    score += 10
-            elif spec_title and spec_title in book_title:
-                score += 8
+                if spec_title in book_title and spec_author in book_author:
+                    score += 30
 
-        # 2. Жанры (с расширением)
-        if expanded_genres:
-            if any(g == book_genre for g in expanded_genres):
-                score += 10
-            elif any(g in book_genre for g in expanded_genres):
-                score += 5
-
-        # 3. Авторы с нормализацией (поиск по подстроке в фамилии)
         if authors:
             book_author_norm = normalize_author(book_author)
+
             for a in authors:
                 a_norm = normalize_author(a)
-                # Проверяем вхождение нормализованного имени
-                if a_norm in book_author_norm or a in book_author:
-                    score += 5
 
-        # 4. Ключевые слова (в заголовке, описании, жанре)
-        if keywords:
-            text = f"{book_title} {book_desc} {book_genre}"
-            for kw in keywords:
-                if kw in text:
-                    score += 2
+                if a_norm and a_norm in book_author_norm:
+                    score += 25
+                elif a and a in book_author:
+                    score += 15
 
-        # 5. Бонус за рейтинг
+        if genres:
+            for g in genres:
+                g = g.lower().strip()
+
+                if g == "horror":
+                    if "ужасы" in book_genre or "хоррор" in book_genre:
+                        score += 35
+                    elif "триллер" in book_genre:
+                        score += 28
+                    elif "мистика" in book_genre:
+                        score += 24
+                    elif "детектив" in book_genre:
+                        score += 8
+
+                elif g == "thriller":
+                    if "триллер" in book_genre:
+                        score += 30
+                    elif "мистика" in book_genre:
+                        score += 18
+                    elif "детектив" in book_genre:
+                        score += 10
+
+                elif g == "mystery":
+                    if "детектив" in book_genre:
+                        score += 20
+                    elif "триллер" in book_genre:
+                        score += 18
+                    elif "мистика" in book_genre:
+                        score += 18
+
+                elif g == "romance":
+                    if "романтика" in book_genre or "любовный роман" in book_genre:
+                        score += 25
+
+                elif g == "fantasy":
+                    if "фэнтези" in book_genre:
+                        score += 25
+                    elif "детское фэнтези" in book_genre:
+                        score += 20
+
+                elif g == "science fiction":
+                    if "научная фантастика" in book_genre:
+                        score += 28
+                    elif "фантастика" in book_genre:
+                        score += 24
+
+                elif g == "children":
+                    if "детская литература" in book_genre:
+                        score += 25
+                    elif "детское фэнтези" in book_genre:
+                        score += 22
+                    elif "сказки" in book_genre:
+                        score += 22
+
+                elif g == "philosophy":
+                    if "философия" in book_genre:
+                        score += 25
+
+                elif g == "self development":
+                    if "саморазвитие" in book_genre:
+                        score += 25
+                    elif "психология" in book_genre:
+                        score += 18
+
+                elif g == "business":
+                    if "бизнес" in book_genre:
+                        score += 25
+
+                elif g == "finance":
+                    if "финансы" in book_genre:
+                        score += 25
+
+                else:
+                    related = GENRE_MAP.get(g, [g])
+                    if book_genre in related or g in book_genre:
+                        score += 15
+                    elif any(r in book_genre for r in related):
+                        score += 8
+
+        for kw in keywords:
+            if not kw:
+                continue
+
+            if kw in full_text:
+                score += 6
+
+            if kw in ["страшное", "страшный", "страх", "ужасы", "хоррор", "мрачный", "жуткий"]:
+                if any(w in full_text for w in ["страх", "ужас", "мрач", "жутк", "тайн", "смерт", "опасн", "убийств", "проклят"]):
+                    score += 10
+
+            if kw in ["триллер", "напряжение", "саспенс", "опасность"]:
+                if any(w in full_text for w in ["напряж", "опасн", "убийств", "тайн", "преступ", "расслед"]):
+                    score += 8
+
+        if is_horror_request:
+            if "романтика" in book_genre or "любовный роман" in book_genre:
+                score -= 40
+
+            if "поэзия" in book_genre:
+                score -= 25
+
+            if "финансы" in book_genre or "бизнес" in book_genre or "саморазвитие" in book_genre:
+                score -= 35
+
+            if "детская литература" in book_genre or "сказки" in book_genre:
+                score -= 20
+
+        if is_thriller_request:
+            if "романтика" in book_genre:
+                score -= 25
+
+            if "финансы" in book_genre or "бизнес" in book_genre:
+                score -= 25
+
         if avg_rating >= min_rating:
-            score += min(avg_rating / 2, 2)
+            score += min(avg_rating / 2, 3)
+
+        if book.get("is_bestseller", False):
+            score += 2
 
         if score > 0:
-            results.append((book, score))
+            scored_results.append((book, score))
 
-    # Сортировка по убыванию score
-    results.sort(key=lambda x: x[1], reverse=True)
-    return [book_to_google_book(book) for book, _ in results[:max_results]]
+    scored_results.sort(key=lambda x: x[1], reverse=True)
+
+    return [book_to_google_book(book) for book, _ in scored_results[:max_results]]
 
 def book_to_google_book(book: dict) -> dict:
     cover = book.get("cover", "")
@@ -575,11 +745,16 @@ async def build_system_prompt_with_history(history: List[Dict], user_id: int, da
 
 Правила:
 1. Определи смысл запроса пользователя: жанр, настроение, тему, автора, похожесть на книгу, возраст, сложность, популярность.
-2. Используй только близкие жанры из каталога: романтика, фэнтези, фантастика, научная фантастика, детектив, триллер, ужасы, мистика, классика, приключения, детская литература, биография, научно-популярная литература, юмор, драма, финансы, бизнес, саморазвитие, философия, поэзия.
+2. В поле genres возвращай только системные жанровые ключи:
+romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, children, biography, history, philosophy, self development, business, finance, poetry.
+Не возвращай русские названия жанров в genres. Русские слова добавляй только в keywords.
 3. Если точного жанра нет или он редкий, подбери 2–4 ближайших жанра.
 4. Никогда не возвращай неподходящий жанр. Если пользователь просит ужасы, нельзя подставлять романтику.
 5. Для каждого запроса добавляй keywords: настроение, темы, синонимы, важные слова из запроса.
-6. Если пользователь просит страшное, хоррор, мрачное — используй жанры: ужасы, мистика, триллер, детектив.
+6. Если пользователь просит страшное, хоррор, ужасы, мрачное, жуткое:
+genres = ["horror", "thriller", "mystery"]
+keywords = ["страх", "ужасы", "мрачный", "жуткий", "мистика", "опасность"]
+Романтику, бизнес, финансы, саморазвитие, поэзию и детскую литературу для такого запроса не использовать.
 7. Если пользователь просит лёгкое — используй жанры: романтика, юмор, приключения, фэнтези.
 8. Если пользователь просит напряжённое — используй жанры: триллер, детектив, мистика.
 9. Если пользователь просит умное или познавательное — используй жанры: научно-популярная литература, философия, саморазвитие.
@@ -628,20 +803,59 @@ async def chat_recommend(request: dict):
         response = await ask_gigachat(query, token, system_prompt)
         content = response["choices"][0]["message"]["content"]
         print(f"🤖 GigaChat: {content}")
-
+    
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
+    
         if json_match:
             parsed = json.loads(json_match.group())
             specific_books = parsed.get("specific_books", [])
             criteria = parsed.get("criteria", {})
+    
+            criteria["keywords"] = criteria.get("keywords", [])
+            criteria["genres"] = criteria.get("genres", [])
+    
+            criteria["genres"] = normalize_requested_genres(
+                criteria.get("genres", []),
+                criteria.get("keywords", []) + query.lower().split()
+            )
+    
+            bad_for_horror = [
+                "romance",
+                "business",
+                "finance",
+                "self development",
+                "poetry",
+                "children"
+            ]
+    
+            request_text = " ".join(
+                criteria["genres"] + criteria["keywords"] + query.lower().split()
+            ).lower()
+    
+            if any(w in request_text for w in ["horror", "ужасы", "ужас", "страш", "хоррор", "мрачн", "жутк"]):
+                criteria["genres"] = [
+                    g for g in criteria["genres"]
+                    if g not in bad_for_horror
+                ]
+    
+                if "horror" not in criteria["genres"]:
+                    criteria["genres"].insert(0, "horror")
+    
+                if "thriller" not in criteria["genres"]:
+                    criteria["genres"].append("thriller")
+    
+                if "mystery" not in criteria["genres"]:
+                    criteria["genres"].append("mystery")
+    
         else:
             specific_books = []
             criteria = {}
+    
     except Exception as e:
         print(f"❌ GigaChat error: {e}")
         specific_books = []
         criteria = {"keywords": query.lower().split()[:5]}
-
+    
     results = []
 
     for spec in specific_books:
@@ -658,7 +872,7 @@ async def chat_recommend(request: dict):
                 if len(results) >= 20:
                     break
 
-    if len(results) < 5:
+    if len(results) == 0:
         try:
             ol_books = await search_openlibrary(criteria, limit=15)
             for book in ol_books:
