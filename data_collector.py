@@ -7,7 +7,6 @@ from sqlalchemy import String, Integer, Float, DateTime, JSON, ForeignKey, Boole
 from sqlalchemy.sql import func as sql_func
 from datetime import datetime, timezone
 
-# --- Модели SQLAlchemy ---
 Base = declarative_base()
 
 
@@ -93,7 +92,6 @@ class ChatHistoryDB(Base):
         }
 
 
-# --- DataCollector ---
 class DataCollector:
     def __init__(self, database_url: str):
         self.engine = create_async_engine(
@@ -108,13 +106,13 @@ class DataCollector:
         self._stats_cache = {"total_interactions": 0, "unique_users": 0, "unique_books": 0}
 
     async def init_db(self):
-        """Создаёт таблицы, если их нет."""
+    
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         await self._refresh_stats()
 
     async def _refresh_stats(self):
-        """Обновляет кэш статистики."""
+  
         async with self.async_session() as session:
             total = await session.scalar(select(func.count(InteractionDB.id)))
             users = await session.scalar(select(func.count(InteractionDB.user_id.distinct())))
@@ -125,9 +123,8 @@ class DataCollector:
                 "unique_books": books or 0
             }
 
-    # --- Методы для книг и взаимодействий ---
     async def add_books(self, books: List[Dict]):
-        """Добавляет или обновляет книги."""
+ 
         async with self.async_session() as session:
             for b in books:
                 book = await session.get(BookDB, b["id"])
@@ -169,7 +166,7 @@ class DataCollector:
         book_data: Dict = None
     ):
         async with self.async_session() as session:
-            # Сохраняем/обновляем книгу
+        
             if book_data:
                 book = await session.get(BookDB, book_id)
                 if not book:
@@ -187,7 +184,7 @@ class DataCollector:
                     )
                     session.add(book)
                 else:
-                    # обновляем метаданные
+                
                     book.title = book_data["title"]
                     book.author = book_data.get("author", "")
                     book.genre = book_data.get("genre", "")
@@ -198,7 +195,6 @@ class DataCollector:
                     book.is_bestseller = book_data.get("is_bestseller", False),
                     book.playlist_url = book_data.get("playlist_url", "")
 
-            # Проверяем существующее взаимодействие
             from sqlalchemy import select
             stmt = select(InteractionDB).where(
                 InteractionDB.user_id == user_id,
@@ -208,13 +204,12 @@ class DataCollector:
             existing = result.scalar_one_or_none()
 
             if existing:
-                # Обновляем
+              
                 existing.rating = rating
                 existing.status = status
-                # Если хотите обновлять timestamp, добавьте:
-                # existing.timestamp = datetime.now(timezone.utc)
+  
             else:
-                # Создаём новое
+      
                 interaction = InteractionDB(
                     user_id=user_id,
                     book_id=book_id,
@@ -227,7 +222,7 @@ class DataCollector:
         await self._refresh_stats()
 
     async def get_user_interactions(self, user_id: int) -> List[Dict]:
-        """Возвращает все взаимодействия пользователя."""
+     
         async with self.async_session() as session:
             result = await session.execute(
                 select(InteractionDB).where(InteractionDB.user_id == user_id)
@@ -236,27 +231,27 @@ class DataCollector:
             return [i.to_dict() for i in interactions]
 
     async def get_all_interactions(self) -> List[Dict]:
-        """Возвращает все взаимодействия (для построения рекомендательной системы)."""
+   
         async with self.async_session() as session:
             result = await session.execute(select(InteractionDB))
             interactions = result.scalars().all()
             return [i.to_dict() for i in interactions]
 
     async def get_all_books(self) -> List[Dict]:
-        """Возвращает все книги."""
+     
         async with self.async_session() as session:
             result = await session.execute(select(BookDB))
             books = result.scalars().all()
             return [b.to_dict() for b in books]
 
     async def get_book_by_id(self, book_id: str) -> Optional[Dict]:
-        """Возвращает книгу по id."""
+       
         async with self.async_session() as session:
             book = await session.get(BookDB, book_id)
             return book.to_dict() if book else None
 
     async def get_user_stats(self, user_id: int) -> Dict:
-        """Статистика пользователя."""
+  
         async with self.async_session() as session:
             interactions = await session.execute(
                 select(InteractionDB).where(InteractionDB.user_id == user_id)
@@ -271,11 +266,11 @@ class DataCollector:
             }
 
     async def get_all_data_stats(self) -> Dict:
-        """Общая статистика (кэшированная)."""
+    
         return self._stats_cache
 
     async def clear_user_data(self, user_id: int) -> bool:
-        """Удаляет все взаимодействия пользователя."""
+      
         try:
             async with self.async_session() as session:
                 await session.execute(
@@ -287,7 +282,6 @@ class DataCollector:
         except Exception:
             return False
 
-    # --- Методы для работы с пользователями ---
     async def create_user(self, username: str, email: str, password_hash: str) -> int:
         async with self.async_session() as session:
             user = UserDB(username=username, email=email, password_hash=password_hash)
@@ -317,7 +311,6 @@ class DataCollector:
             result = await session.execute(select(UserDB).where(UserDB.email == email))
             return result.scalar_one_or_none()
 
-    # --- Методы для работы с историей чата ---
     async def save_chat_message(self, user_id: int, message: str, is_from_user: bool, session_id: str = None, data: Dict = None) -> int:
         async with self.async_session() as session:
             chat = ChatHistoryDB(
