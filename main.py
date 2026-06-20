@@ -22,7 +22,6 @@ from recommender import BookRecommender
 
 load_dotenv()
 
-# ==================== ПРЕОБРАЗОВАНИЕ URL ДЛЯ ASYNCPG ====================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is not set")
@@ -30,7 +29,6 @@ if "postgresql" in DATABASE_URL and "+asyncpg" not in DATABASE_URL:
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
     print(f"✅ Преобразованный DATABASE_URL для asyncpg: {DATABASE_URL}")
 
-# ==================== МАППИНГ ЖАНРОВ ====================
 GENRE_MAP = {
     "romance": ["романтика", "любовный роман"],
     "fantasy": ["фэнтези"],
@@ -50,7 +48,7 @@ GENRE_MAP = {
 }
 
 def expand_genres(genres: List[str]) -> List[str]:
-    """Расширяет список жанров, добавляя русские эквиваленты."""
+   
     expanded = []
     for g in genres:
         g_lower = g.lower()
@@ -59,7 +57,6 @@ def expand_genres(genres: List[str]) -> List[str]:
             expanded.extend(GENRE_MAP[g_lower])
     return list(set(expanded))
 
-# ==================== ЗАГРУЗКА ЛОКАЛЬНЫХ КНИГ ====================
 def generate_global_id(title: str, author: str) -> str:
     base = f"{title}|{author}".lower()
     return re.sub(r'[^a-zа-я0-9|]', '', base)
@@ -83,19 +80,18 @@ try:
 except Exception as e:
     print(f"❌ Ошибка загрузки локальных книг: {e}")
 
-# ==================== ФУНКЦИИ ПОИСКА ====================
 
 
 def normalize_author(name: str) -> str:
-    """Нормализует имя автора: убирает инициалы и точки, оставляет фамилию (или самую длинную часть)"""
+ 
     if not name:
         return ""
-    # Убираем точки, запятые, лишние пробелы
+    
     cleaned = re.sub(r'[.,]', '', name).strip()
     parts = cleaned.split()
     if not parts:
         return ""
-    # Если больше одного слова, ищем самое длинное (скорее всего фамилия)
+   =
     return max(parts, key=len).lower()
 
 def search_local_books(criteria: dict) -> list:
@@ -103,7 +99,7 @@ def search_local_books(criteria: dict) -> list:
     Поиск по локальным книгам.
     criteria может содержать:
       - specific_books: list[{"title":..., "author":...}]
-      - genres: list[str] (на английском, будут расширены)
+      - genres: list[str] 
       - authors: list[str]
       - keywords: list[str]
       - min_rating: float
@@ -117,7 +113,6 @@ def search_local_books(criteria: dict) -> list:
     min_rating = criteria.get("min_rating", 0)
     max_results = criteria.get("max_results", 20)
 
-    # Если нет никаких критериев – случайные книги
     if not expanded_genres and not keywords and not authors and not specific_books:
         all_books = list(LOCAL_BOOKS)
         random.shuffle(all_books)
@@ -250,7 +245,6 @@ def openlibrary_to_google_book(doc: dict) -> dict:
         }
     }
 
-# ==================== ФУНКЦИИ ДЛЯ GIGACHAT ====================
 _cached_token = None
 _token_expiry = 0
 
@@ -337,7 +331,6 @@ async def get_cached_token():
     print("✅ GigaChat token получен и закэширован")
     return token
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ПРИЛОЖЕНИЯ ====================
 app = FastAPI(
     title="Гибридная рекомендательная система книг",
     description="API для гибридных рекомендаций + Чат с AI",
@@ -374,7 +367,6 @@ async def startup_event():
     await asyncio.to_thread(recommender.build, all_interactions, all_books)
     print("✅ Рекомендательная система построена")
 
-# ==================== ЭНДПОИНТЫ ПОЛЬЗОВАТЕЛЕЙ ====================
 class RegisterRequest(BaseModel):
     username: str
     email: EmailStr
@@ -482,7 +474,6 @@ async def update_user_book(user_id: int, request: UserBookUpdate):
     await asyncio.to_thread(recommender.build, all_interactions, all_books)
     return {"status": "ok"}
 
-# ==================== ОСТАЛЬНЫЕ ЭНДПОИНТЫ ====================
 @app.get("/")
 async def root():
     return {
@@ -563,32 +554,41 @@ async def get_hybrid_recommendations(request: RecommendationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ==================== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ ПРОМПТА ====================
 async def build_system_prompt_with_history(history: List[Dict], user_id: int, data_collector) -> str:
-    # Базовый системный промпт (без автоматических жанров)
-    base_prompt = """
-Ты — эксперт по книгам. Твоя задача — преобразовать запрос пользователя в структурированные критерии для поиска книг.
 
-Верни ТОЛЬКО JSON в точном формате:
+    base_prompt = """
+Ты — модуль понимания пользовательского запроса для книжного приложения.
+
+Твоя задача — не советовать книги напрямую, а преобразовать любой запрос пользователя в JSON для поиска по локальному каталогу.
+
+Верни только JSON без пояснений.
+
+Формат:
 {
-  "specific_books": [{"title": "...", "author": "..."}],
+  "specific_books": [],
   "criteria": {
-    "genres": ["жанр1", "жанр2"],
-    "authors": ["автор1"],
-    "keywords": ["слово1", "слово2"],
+    "genres": [],
+    "authors": [],
+    "keywords": [],
     "min_rating": 0
   }
 }
 
 Правила:
-1. Если пользователь упоминает конкретную книгу или автора — укажи в specific_books.
-2. Для неявных запросов (настроение, тема) самостоятельно определи жанры и ключевые слова.
-3. Жанры указывай на английском из списка: romance, fantasy, science fiction, mystery, thriller, horror, adventure, classics, poetry, biography, history, philosophy, self development, business, finance, comedy, short stories.
-4. Если пользователь просит «популярное» или «лучшее» — установи min_rating: 4.0.
-5. Не добавляй пояснений, только JSON.
+1. Определи смысл запроса пользователя: жанр, настроение, тему, автора, похожесть на книгу, возраст, сложность, популярность.
+2. Используй только близкие жанры из каталога: романтика, фэнтези, фантастика, научная фантастика, детектив, триллер, ужасы, мистика, классика, приключения, детская литература, биография, научно-популярная литература, юмор, драма, финансы, бизнес, саморазвитие, философия, поэзия.
+3. Если точного жанра нет или он редкий, подбери 2–4 ближайших жанра.
+4. Никогда не возвращай неподходящий жанр. Если пользователь просит ужасы, нельзя подставлять романтику.
+5. Для каждого запроса добавляй keywords: настроение, темы, синонимы, важные слова из запроса.
+6. Если пользователь просит страшное, хоррор, мрачное — используй жанры: ужасы, мистика, триллер, детектив.
+7. Если пользователь просит лёгкое — используй жанры: романтика, юмор, приключения, фэнтези.
+8. Если пользователь просит напряжённое — используй жанры: триллер, детектив, мистика.
+9. Если пользователь просит умное или познавательное — используй жанры: научно-популярная литература, философия, саморазвитие.
+10. Если пользователь просит похожее на конкретную книгу, добавь книгу в specific_books и выдели её темы в keywords.
+11. Если пользователь просит популярное, лучшее, известное — min_rating = 4.0.
+12. Если запрос непонятный, верни широкие нейтральные критерии с несколькими жанрами и keywords, а не пустой JSON.
 """
 
-    # Добавляем историю диалога (последние 5 сообщений) — это помогает уточнять контекст
     if history:
         base_prompt += "\n\nИстория диалога:\n"
         for msg in history[-5:]:
@@ -600,7 +600,6 @@ async def build_system_prompt_with_history(history: List[Dict], user_id: int, da
 
 
 
-# ==================== ЭНДПОИНТ ЧАТА С СОХРАНЕНИЕМ ИСТОРИИ ====================
 @app.post("/api/chat_recommend")
 async def chat_recommend(request: dict):
     query = request.get("query", "")
@@ -612,14 +611,12 @@ async def chat_recommend(request: dict):
 
     print(f"📝 Запрос чата: {query}, user_id={user_id}, session_id={session_id}")
 
-    # Сохраняем вопрос пользователя
     if user_id > 0:
         saved_id = await data_collector.save_chat_message(user_id, query, True, session_id)
         print(f"💾 Сохранён вопрос пользователя, id={saved_id}, session_id={session_id}")
     else:
         print("⚠️ user_id=0, история не сохраняется")
 
-    # Загружаем историю
     history = []
     if user_id > 0:
         history = await data_collector.get_chat_history(user_id, limit=10, session_id=session_id)
@@ -627,7 +624,6 @@ async def chat_recommend(request: dict):
 
     system_prompt = await build_system_prompt_with_history(history, user_id, data_collector)
 
-    # --- Работа с GigaChat ---
     try:
         token = await get_cached_token()
         response = await ask_gigachat(query, token, system_prompt)
@@ -647,18 +643,14 @@ async def chat_recommend(request: dict):
         specific_books = []
         criteria = {"keywords": query.lower().split()[:5]}
 
-    # --- Поиск книг ---
     results = []
 
-    # 1. Поиск по конкретным книгам
     for spec in specific_books:
         for book in LOCAL_BOOKS:
             if (spec.get("title", "").lower() in book["title"].lower() or
                 spec.get("author", "").lower() in book["author"].lower()):
                 results.append(book_to_google_book(book))
                 break
-
-    # 2. Поиск по локальным книгам
     if len(results) < 10:
         local_found = search_local_books(criteria)
         for book in local_found:
@@ -667,7 +659,6 @@ async def chat_recommend(request: dict):
                 if len(results) >= 20:
                     break
 
-    # 3. OpenLibrary
     if len(results) < 5:
         try:
             ol_books = await search_openlibrary(criteria, limit=15)
@@ -677,7 +668,6 @@ async def chat_recommend(request: dict):
         except Exception as e:
             print(f"OpenLibrary error: {e}")
 
-    # 4. Fallback
     if not results:
         all_books = await data_collector.get_all_books()
         if all_books:
@@ -690,7 +680,6 @@ async def chat_recommend(request: dict):
     for i, b in enumerate(final[:3]):
         print(f"   {i+1}. {b['volumeInfo']['title']}")
 
-    # Сохраняем ответ ассистента (один раз, после получения final)
     if user_id > 0 and results:
         assistant_data = {
             "type": "books",
@@ -804,13 +793,13 @@ async def update_profile(user_id: int, request: ProfileUpdateRequest):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-# Путь к папке с текстами (создайте её в корне проекта)
+
 TEXTS_DIR = "book_texts"
 
 @app.get("/api/book/{book_id}/content", response_class=PlainTextResponse)
 async def get_book_content(book_id: str):
     print(f"🔍 Ищу текст для book_id = '{book_id}'")
-    # Защита от подстановки путей
+  
     safe_id = book_id.replace("/", "").replace("\\", "").replace("..", "")
     file_path = os.path.join(TEXTS_DIR, f"{safe_id}.txt")
     
@@ -822,15 +811,12 @@ async def get_book_content(book_id: str):
     return content
 @app.get("/api/chat_history/{user_id}")
 async def get_chat_history(user_id: int, session_id: str = None):
-    """Возвращает историю чата пользователя (опционально по session_id)"""
+    
     history = await data_collector.get_chat_history(user_id, limit=100, session_id=session_id)
     return {"history": history}
 
 @app.get("/api/search")
 async def search_books(q: str, user_id: int = 0):
-    """
-    Обычный поиск книг по названию или автору (без сохранения в историю чата)
-    """
     if not q:
         return {"results": []}
     
@@ -845,7 +831,6 @@ async def search_books(q: str, user_id: int = 0):
             if len(results) >= 20:
                 break
     
-    # Если ничего не нашли, пробуем через OpenLibrary
     if not results:
         try:
             ol_results = await search_openlibrary({"keywords": [query_lower]}, limit=10)
