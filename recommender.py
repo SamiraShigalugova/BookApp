@@ -26,7 +26,6 @@ class BookRecommender:
             "при","под","из","к","о","у"
         }
 
-    # ================= BUILD =================
 
     def build(self, interactions: List[Dict], books: List[Dict]):
         self.books_metadata = {b["id"]: b for b in books}
@@ -48,7 +47,6 @@ class BookRecommender:
         self._build_similarity()
         self._build_popularity(interactions)
 
-    # ================= FEATURES =================
 
     def _tokenize(self, text: str):
         words = text.lower().split()
@@ -98,7 +96,6 @@ class BookRecommender:
     def _feature_weight(self, f: str):
         df = self.feature_doc_freq.get(f, 1)
 
-        # фильтр шума
         if df < 2:
             return 0.0
         if df > self.total_books * 0.8:
@@ -106,7 +103,6 @@ class BookRecommender:
 
         return np.log(self.total_books / df)
 
-    # ================= MATRIX =================
 
     def _build_matrix(self, interactions):
         n_users = len(self.user_ids)
@@ -125,7 +121,7 @@ class BookRecommender:
 
         self.user_book_matrix = matrix
 
-    # ================= COLLAB =================
+ 
 
     def _build_similarity(self):
         if self.user_book_matrix is None:
@@ -152,7 +148,6 @@ class BookRecommender:
         normalized = book_vectors / norms
         sim = np.dot(normalized, normalized.T)
 
-        # 🔥 shrinkage (ключевое улучшение)
         co_counts = np.dot(mask.T, mask.T.T)
         sim = sim * (co_counts / (co_counts + 10))
 
@@ -184,7 +179,6 @@ class BookRecommender:
 
         return np.sum(sims * user_ratings[rated_idx]) / (np.sum(weights) + 1e-8)
 
-    # ================= CONTENT =================
 
     def _build_profile(self, interactions):
         profile = defaultdict(float)
@@ -213,7 +207,6 @@ class BookRecommender:
 
         return score
 
-    # ================= POPULAR =================
 
     def _build_popularity(self, interactions):
         cnt = defaultdict(int)
@@ -230,7 +223,6 @@ class BookRecommender:
             avg = s[b] / cnt[b]
             self.book_popularity[b] = avg * np.log1p(cnt[b])
 
-    # ================= RECOMMEND =================
 
     def recommend(self, user_id, candidate_books, user_interactions, top_k=10):
 
@@ -264,7 +256,6 @@ class BookRecommender:
         if not scored:
             return [], []
 
-        # нормализация
         vals = np.array([s for _, s in scored])
         min_v, max_v = vals.min(), vals.max()
 
@@ -275,7 +266,6 @@ class BookRecommender:
 
         scored = [(scored[i][0], vals[i]) for i in range(len(scored))]
 
-        # ================= MMR =================
         selected = []
         used = set()
 
@@ -311,7 +301,6 @@ class BookRecommender:
 
         return selected, scores
 
-    # ================= POPULAR =================
 
     def _popular(self, books, exclude, top_k):
         scored = []
@@ -334,7 +323,7 @@ class BookRecommender:
         books, scores = zip(*top)
         return list(books), list(scores)
 
-    # ================= METRICS =================
+
 
     def precision_at_k(self, recommendations, relevant, k=10):
         rec_ids = [b["id"] for b in recommendations[:k]]
