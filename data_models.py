@@ -1,4 +1,3 @@
-# data_models.py
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
@@ -33,7 +32,6 @@ class RecommendationResponse(BaseModel):
     message: str = "Гибридные рекомендации"
     system_type: str = "гибридная"
 
-# Модели для чата и других запросов
 class ChatRequest(BaseModel):
     query: str
     user_id: int
