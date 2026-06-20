@@ -138,7 +138,7 @@ class DataCollector:
                         average_rating=b.get("average_rating", 0.0),
                         cover_url=b.get("cover_url", ""),
                         description=b.get("description", ""),
-                        is_bestseller=b.get("is_bestseller", False),
+                        is_bestseller=b.get("is_bestseller", False)
                         playlist_url=b.get("playlist_url", "")
                     )
                     session.add(book)
