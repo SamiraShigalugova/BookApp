@@ -91,7 +91,6 @@ def normalize_author(name: str) -> str:
     parts = cleaned.split()
     if not parts:
         return ""
-   =
     return max(parts, key=len).lower()
 
 def search_local_books(criteria: dict) -> list:
