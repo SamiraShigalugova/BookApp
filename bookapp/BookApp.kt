@@ -1130,18 +1130,16 @@ fun SearchScreen(
     }
 
     LaunchedEffect(searchQuery, currentGenre) {
-        // Если выбран жанр и поисковый запрос пуст, ищем по жанру
-        if (currentGenre != null && searchQuery.trim().isEmpty()) {
-            if (!isGenreSearchActive) {
-                isGenreSearchActive = true
-                bookViewModel.searchBooksByGenreLocally(currentGenre)
-            }
+
+        if (currentGenre != null && searchQuery.trim().isNotEmpty()) {
+            isGenreSearchActive = true
+            bookViewModel.searchBooksByGenreAndQueryLocally(currentGenre, searchQuery.trim())
             return@LaunchedEffect
         }
 
-        if (currentGenre != null && searchQuery.trim().isNotEmpty()) {
-            isGenreSearchActive = false
-            bookViewModel.quickSearchBooks("${currentGenre} ${searchQuery.trim()}")
+        if (currentGenre != null && searchQuery.trim().isEmpty()) {
+            isGenreSearchActive = true
+            bookViewModel.searchBooksByGenreLocally(currentGenre)
             return@LaunchedEffect
         }
 
@@ -1149,9 +1147,9 @@ fun SearchScreen(
             isGenreSearchActive = false
             val trimmedQuery = searchQuery.trim()
             if (trimmedQuery.length >= 2) {
-                delay(500)
+                delay(500)  
                 if (trimmedQuery == searchQuery.trim() && currentGenre == null) {
-                    bookViewModel.quickSearchBooks(trimmedQuery)
+                    bookViewModel.searchBooksLocallyByQuery(trimmedQuery)  
                 }
             }
             return@LaunchedEffect
