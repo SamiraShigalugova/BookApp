@@ -204,7 +204,7 @@ class BookViewModel(
                 return
             }
 
-            val content = context.assets.open(sourcePath).bufferedReader(java.nio.charset.Charset.forName("windows-1251")).use { it.readText() }
+            val content = context.assets.open(sourcePath).bufferedReader(Charsets.UTF_8).use { it.readText() }
             _bookContent.value = content
         } catch (e: FileNotFoundException) {
             _contentError.value = "Текст книги не найден в папке assets"
@@ -367,7 +367,105 @@ class BookViewModel(
             }
         }
     }
+    fun searchBooksByGenreAndQueryLocally(genre: String, query: String) {
+        viewModelScope.launch {
+            _isSearching.value = true
+            _searchError.value = null
+            try {
+                val targetGenre = genre.trim().lowercase()
+                val searchQuery = query.trim().lowercase()
 
+                val results = allBooksCache.filter { book ->
+
+                    val bookGenreRaw = book.genre.trim().lowercase()
+                    val translatedToRussian = translateGenreToRussian(book.genre).lowercase()
+                    val translatedToEnglish = translateGenreToEnglish(genre).lowercase()
+
+                    val genreMatch = bookGenreRaw == targetGenre ||
+                            translatedToRussian == targetGenre ||
+                            bookGenreRaw == translatedToEnglish
+
+                    val titleMatch = book.title.lowercase().contains(searchQuery)
+                    val authorMatch = book.author.lowercase().contains(searchQuery)
+
+                    genreMatch && (titleMatch || authorMatch)
+                }
+
+                val googleBooks = results.map { book ->
+                    GoogleBook(
+                        id = book.globalId,
+                        volumeInfo = VolumeInfo(
+                            title = book.title,
+                            authors = listOf(book.author),
+                            description = book.description,
+                            categories = listOf(book.genre),
+                            averageRating = book.averageRating,
+                            ratingsCount = book.ratingsCount,
+                            imageLinks = if (book.coverUrl.isNotEmpty())
+                                ImageLinks(thumbnail = book.coverUrl) else null,
+                            language = book.language
+                        )
+                    )
+                }
+
+                _searchResults.value = googleBooks
+                if (googleBooks.isEmpty()) {
+                    _searchError.value = "Книг по жанру '$genre' с названием '$query' не найдено"
+                } else {
+                    _searchError.value = null
+                }
+            } catch (e: Exception) {
+                _searchError.value = "Ошибка поиска: ${e.message}"
+                _searchResults.value = emptyList()
+            } finally {
+                _isSearching.value = false
+            }
+        }
+    }
+    fun searchBooksLocallyByQuery(query: String) {
+        viewModelScope.launch {
+            _isSearching.value = true
+            _searchError.value = null
+            try {
+                val searchQuery = query.trim().lowercase()
+
+                val results = allBooksCache.filter { book ->
+                    book.title.lowercase().contains(searchQuery) ||
+                            book.author.lowercase().contains(searchQuery) ||
+                            book.genre.lowercase().contains(searchQuery)
+                }
+
+                val googleBooks = results.map { book ->
+                    GoogleBook(
+                        id = book.globalId,
+                        volumeInfo = VolumeInfo(
+                            title = book.title,
+                            authors = listOf(book.author),
+                            description = book.description,
+                            categories = listOf(book.genre),
+                            averageRating = book.averageRating,
+                            ratingsCount = book.ratingsCount,
+                            imageLinks = if (book.coverUrl.isNotEmpty())
+                                ImageLinks(thumbnail = book.coverUrl) else null,
+                            language = book.language
+                        )
+                    )
+                }
+
+                _searchResults.value = googleBooks
+                if (googleBooks.isEmpty()) {
+                    _searchError.value = "Ничего не найдено по запросу \"$query\""
+                } else {
+                    _searchError.value = null
+                }
+            } catch (e: Exception) {
+                _searchError.value = "Ошибка поиска: ${e.message}"
+                _searchResults.value = emptyList()
+            } finally {
+                _isSearching.value = false
+            }
+        }
+    }
     fun selectGenre(genre: String?) {
         _selectedGenre.value = genre
         if (genre != null) {
