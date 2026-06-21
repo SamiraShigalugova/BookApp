@@ -143,7 +143,7 @@ class DataCollector:
                     )
                     session.add(book)
                 else:
-                    # обновляем (на случай, если изменились метаданные)
+                   
                     book.title = b["title"]
                     book.author = b.get("author", "")
                     book.genre = b.get("genre", "")
@@ -192,7 +192,7 @@ class DataCollector:
                     book.average_rating = book_data.get("average_rating", 0.0)
                     book.cover_url = book_data.get("cover_url", "")
                     book.description = book_data.get("description", "")
-                    book.is_bestseller = book_data.get("is_bestseller", False),
+                    book.is_bestseller = book_data.get("is_bestseller", False)
                     book.playlist_url = book_data.get("playlist_url", "")
 
             from sqlalchemy import select
